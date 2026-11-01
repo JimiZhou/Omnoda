@@ -2,6 +2,8 @@
 
 Every Device. One Mind.
 
+v0.2 adds `omnoda seed`, a single-device runtime with a local capability registry and an approval-gated evolver. See [docs/seed.md](docs/seed.md). v0.1 node join and the control plane remain.
+
 Omnoda is a private control plane for the computers you already own. A node dials out over WebSocket, reports what it can run, and executes only the commands and agent harnesses its local policy allows. You describe a goal once. Omnoda selects a device, runs the step, and keeps the result.
 
 This repository is POC v0.1. It is a single-operator system, not a hosted service.

@@ -80,6 +80,13 @@ export const api = {
   audit: () => req<{ audit: Audit[] }>("/api/v1/audit"),
   model: () => req<Model>("/api/v1/settings/model"),
   saveModel: (m: Model) => req<Model>("/api/v1/settings/model", { method: "PUT", body: JSON.stringify(m) }),
+  capabilities: () => req<{ capabilities: Capability[] }>("/api/v1/capabilities"),
+  evolutions: () => req<{ evolutions: Evolution[] }>("/api/v1/evolutions"),
+  approveEvolution: (id: string) => req<Evolution>(`/api/v1/evolutions/${id}/approve`, { method: "POST", body: "{}" }),
+  rejectEvolution: (id: string) => req<Evolution>(`/api/v1/evolutions/${id}/reject`, { method: "POST", body: "{}" }),
+  disableCapability: (id: string) => req(`/api/v1/capabilities/${id}/disable`, { method: "POST", body: "{}" }),
+  agentRun: (goal: string, workspace: string) =>
+    req<{ answer: string }>("/api/v1/agent/run", { method: "POST", body: JSON.stringify({ goal, workspace }) }),
 };
 
 export type TaskRow = {
@@ -93,3 +100,13 @@ export type Report = { workflow_id: string; goal: string; planner: string; final
 export type Approval = { id: string; workflow_id: string; step_id: string; node_id: string; action: string; args_json: string; status: string };
 export type Audit = { Who: string; Action: string; Result: string; NodeID: string; CreatedAt: string; Permission: string };
 export type Model = { base_url: string; model: string; api_key?: string; max_steps: number; timeout_sec: number; token_budget: number; configured: boolean };
+export type Capability = {
+  capability_id: string; version: string; activation_status: string; verification_status: string;
+  origin: string; content_hash: string; runtime: string;
+  manifest: { metadata: { description: string }; spec: { platforms: string[]; permissions: { network: boolean } } };
+};
+export type Evolution = {
+  evolution_id: string; original_goal: string; state: string; final_status: string; error?: string;
+  capability_id?: string; generated_version?: string; token_usage: number;
+  test_results?: Record<string, boolean>; evidence?: { phase: string; detail: string }[];
+};

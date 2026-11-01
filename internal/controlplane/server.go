@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/JimiZhou/Omnoda/internal/auth"
+	"github.com/JimiZhou/Omnoda/internal/capabilities/registry"
+	"github.com/JimiZhou/Omnoda/internal/evolver"
 	"github.com/JimiZhou/Omnoda/internal/identity"
 	"github.com/JimiZhou/Omnoda/internal/planner"
 	"github.com/JimiZhou/Omnoda/internal/protocol"
@@ -40,6 +42,9 @@ type Server struct {
 	engine    *workflow.Engine
 	mux       *http.ServeMux
 	upgrader  websocket.Upgrader
+	// Caps and Evos are set by the seed runtime. They stay nil on a plain server.
+	Caps *registry.Registry
+	Evos *evolver.Store
 }
 
 func New(db *storage.DB, dataDir, publicURL, version string) (*Server, error) {
@@ -98,6 +103,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/settings/model", s.authed(s.getModel))
 	s.mux.HandleFunc("PUT /api/v1/settings/model", s.authed(s.putModel))
 	s.mux.HandleFunc("GET /api/v1/events", s.authed(s.eventStream))
+	s.mux.HandleFunc("GET /api/v1/seed/bootstrap", s.bootstrapInfo)
+	s.mux.HandleFunc("POST /api/v1/seed/bootstrap", s.bootstrapInfo)
+	s.mux.HandleFunc("GET /api/v1/capabilities", s.authed(s.listCaps))
+	s.mux.HandleFunc("GET /api/v1/capabilities/{id}", s.authed(s.getCap))
+	s.mux.HandleFunc("POST /api/v1/capabilities/import", s.authed(s.importCap))
+	s.mux.HandleFunc("POST /api/v1/capabilities/{id}/test", s.authed(s.testCap))
+	s.mux.HandleFunc("POST /api/v1/capabilities/{id}/activate", s.authed(s.activateCap))
+	s.mux.HandleFunc("POST /api/v1/capabilities/{id}/disable", s.authed(s.disableCap))
+	s.mux.HandleFunc("POST /api/v1/capabilities/{id}/export", s.authed(s.exportCap))
+	s.mux.HandleFunc("POST /api/v1/evolutions", s.authed(s.createEvo))
+	s.mux.HandleFunc("GET /api/v1/evolutions", s.authed(s.listEvos))
+	s.mux.HandleFunc("GET /api/v1/evolutions/{id}", s.authed(s.getEvo))
+	s.mux.HandleFunc("POST /api/v1/evolutions/{id}/approve", s.authed(s.approveEvo))
+	s.mux.HandleFunc("POST /api/v1/evolutions/{id}/reject", s.authed(s.rejectEvo))
+	s.mux.HandleFunc("POST /api/v1/agent/run", s.authed(s.agentRun))
 	s.mux.HandleFunc("GET /api/v1/node/ws", s.nodeWS)
 	s.mux.HandleFunc("GET /install.sh", s.installSh)
 	s.mux.HandleFunc("GET /install.ps1", s.installPS)
@@ -467,9 +487,12 @@ func (s *Server) createWorkflow(w http.ResponseWriter, r *http.Request) {
 	if body.Planner == "llm" || body.Planner == "auto" || body.Planner == "" {
 		mc, enc, _ := s.DB.LoadModel()
 		if enc != "" && mc.BaseURL != "" {
-			key, err := auth.Open(s.SealKey, enc)
-			if err == nil {
+			key, next, migErr := s.openSecret(enc)
+			if migErr == nil {
 				llm = &planner.LLMConfig{BaseURL: mc.BaseURL, Model: mc.Model, APIKey: key}
+				if next != enc {
+					_ = s.DB.SaveModel(mc, next)
+				}
 			}
 		}
 	}
@@ -612,7 +635,12 @@ func (s *Server) putModel(w http.ResponseWriter, r *http.Request) {
 	}
 	enc := ""
 	if m.APIKey != "" {
-		enc = auth.Seal(s.SealKey, []byte(m.APIKey))
+		sealed, err := auth.Seal(s.SealKey, []byte(m.APIKey))
+		if err != nil {
+			writeErr(w, 500, "seal", err.Error())
+			return
+		}
+		enc = sealed
 	}
 	if m.MaxSteps <= 0 {
 		m.MaxSteps = 8
@@ -698,6 +726,14 @@ func writeErr(w http.ResponseWriter, code int, c, msg string) {
 	writeJSON(w, code, protocol.ErrorBody{Code: c, Message: msg})
 }
 
+// openSecret decrypts a stored secret and migrates a legacy XOR seal in place.
+// A migration failure returns the original ciphertext to the caller via the error
+// and must not be written back.
+func (s *Server) openSecret(enc string) (plain, next string, err error) {
+	next, plain, _, err = auth.MigrateLegacy(s.SealKey, enc)
+	return plain, next, err
+}
+
 func loadSeal(dir string) ([]byte, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -720,7 +756,7 @@ func loadSeal(dir string) ([]byte, error) {
 func (s *Server) static() http.Handler {
 	// Filled by embed in web_static.go if present; otherwise a tiny fallback.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/install.sh" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/install.sh" || r.URL.Path == "/install.ps1" || strings.HasPrefix(r.URL.Path, "/releases/") {
 			http.NotFound(w, r)
 			return
 		}
@@ -736,6 +772,7 @@ func (s *Server) nodeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(1 << 20)
 	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var hello protocol.Envelope
 	if err := conn.ReadJSON(&hello); err != nil || hello.Type != protocol.MsgHello {
@@ -865,9 +902,21 @@ func errEnv(code, msg string) protocol.Envelope {
 
 // Hub tracks live sockets and in-flight task waiters.
 
+type hubConn struct {
+	conn *websocket.Conn
+	wmu  sync.Mutex
+}
+
+func (c *hubConn) writeJSON(v any) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	_ = c.conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
+	return c.conn.WriteJSON(v)
+}
+
 type Hub struct {
 	mu       sync.Mutex
-	conns    map[string]*websocket.Conn
+	conns    map[string]*hubConn
 	waiters  map[string]chan protocol.TaskResult
 	subs     map[int]chan protocol.Event
 	nextSub  int
@@ -876,7 +925,7 @@ type Hub struct {
 
 func newHub() *Hub {
 	return &Hub{
-		conns: map[string]*websocket.Conn{}, waiters: map[string]chan protocol.TaskResult{},
+		conns: map[string]*hubConn{}, waiters: map[string]chan protocol.TaskResult{},
 		subs: map[int]chan protocol.Event{}, inflight: map[string]int{},
 	}
 }
@@ -897,16 +946,16 @@ func (h *Hub) running(id string) int {
 func (h *Hub) attach(id string, c *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if old, ok := h.conns[id]; ok && old != c {
-		_ = old.Close()
+	if old, ok := h.conns[id]; ok && old.conn != c {
+		_ = old.conn.Close()
 	}
-	h.conns[id] = c
+	h.conns[id] = &hubConn{conn: c}
 }
 
 func (h *Hub) detach(id string, c *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if cur, ok := h.conns[id]; ok && cur == c {
+	if cur, ok := h.conns[id]; ok && cur.conn == c {
 		delete(h.conns, id)
 	}
 }
@@ -917,8 +966,8 @@ func (h *Hub) drop(id string) {
 	delete(h.conns, id)
 	h.mu.Unlock()
 	if c != nil {
-		_ = c.WriteJSON(protocol.Envelope{V: 1, Type: "node.revoked", Timestamp: time.Now().UTC()})
-		_ = c.Close()
+		_ = c.writeJSON(protocol.Envelope{V: 1, Type: "node.revoked", Timestamp: time.Now().UTC()})
+		_ = c.conn.Close()
 	}
 }
 
@@ -929,9 +978,7 @@ func (h *Hub) send(id string, env protocol.Envelope) error {
 	if c == nil {
 		return errors.New("node offline")
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return c.WriteJSON(env)
+	return c.writeJSON(env)
 }
 
 func (h *Hub) assign(id string, spec protocol.TaskSpec) error {
@@ -948,8 +995,8 @@ func (h *Hub) assign(id string, spec protocol.TaskSpec) error {
 	h.inflight[id]++
 	ch := make(chan protocol.TaskResult, 1)
 	h.waiters[spec.TaskID] = ch
-	err := c.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgTaskAssign, RequestID: spec.Idempotency, Timestamp: time.Now().UTC(), Payload: map[string]any{"task": spec}})
 	h.mu.Unlock()
+	err := c.writeJSON(protocol.Envelope{V: 1, Type: protocol.MsgTaskAssign, RequestID: spec.Idempotency, Timestamp: time.Now().UTC(), Payload: map[string]any{"task": spec}})
 	if err != nil {
 		h.finish(spec.TaskID, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, Error: err.Error()})
 		return err

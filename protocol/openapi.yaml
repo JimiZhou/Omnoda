@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Omnoda Control Plane API
-  version: 0.1.0
+  version: 0.2.0
 paths:
   /api/v1/auth/login:
     post:
@@ -60,6 +60,47 @@ paths:
   /api/v1/audit:
     get:
       summary: Audit log
+  /api/v1/seed/bootstrap:
+    get:
+      summary: Seed runtime descriptor. Loopback process, no remote control plane.
+  /api/v1/capabilities:
+    get:
+      summary: List capability records. Requires a session.
+  /api/v1/capabilities/{id}:
+    get:
+      summary: One capability, including manifest and verification status.
+  /api/v1/capabilities/import:
+    post:
+      summary: Import a bundle. Installed, not enabled.
+  /api/v1/capabilities/{id}/test:
+    post:
+      summary: Invoke an enabled capability. Untrusted code requires a sandbox backend.
+  /api/v1/capabilities/{id}/activate:
+    post:
+      summary: Enable one verified version. Disables other versions of the same id.
+  /api/v1/capabilities/{id}/disable:
+    post:
+      summary: Disable a capability.
+  /api/v1/capabilities/{id}/export:
+    post:
+      summary: Write a bundle that excludes secrets and the device key.
+  /api/v1/evolutions:
+    post:
+      summary: Start a bounded evolution. Fails closed when no model is configured.
+    get:
+      summary: List evolutions.
+  /api/v1/evolutions/{id}:
+    get:
+      summary: Evolution record and evidence.
+  /api/v1/evolutions/{id}/approve:
+    post:
+      summary: Enable the verified candidate. Refused from any other state.
+  /api/v1/evolutions/{id}/reject:
+    post:
+      summary: Reject a candidate waiting for approval.
+  /api/v1/agent/run:
+    post:
+      summary: One native agent turn. Requires a configured model. Does not invent a reply.
   /api/v1/node/ws:
     get:
       summary: Node websocket. Requires enrollment or a known device key. Not a public RPC endpoint.
