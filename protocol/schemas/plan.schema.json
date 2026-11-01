@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnoda.local/schemas/plan.json",
+  "type": "object",
+  "required": ["goal", "planner", "steps"],
+  "properties": {
+    "goal": { "type": "string" },
+    "planner": { "enum": ["llm", "template"] },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["step_id", "type", "level"],
+        "properties": {
+          "step_id": { "type": "string" },
+          "type": { "enum": ["command", "harness", "native", "report", "builtin"] },
+          "level": { "enum": ["READ_ONLY", "WORKSPACE_WRITE"] },
+          "approval_policy": { "enum": ["none", "required"] }
+        }
+      }
+    }
+  }
+}

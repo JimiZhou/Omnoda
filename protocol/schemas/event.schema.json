@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnoda.local/schemas/event.json",
+  "type": "object",
+  "required": ["event_id", "run_id", "timestamp", "sequence", "event_type"],
+  "properties": {
+    "event_id": { "type": "string" },
+    "run_id": { "type": "string" },
+    "node_id": { "type": "string" },
+    "task_id": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "sequence": { "type": "integer" },
+    "event_type": {
+      "enum": ["run.started", "message.delta", "tool.started", "tool.completed", "artifact.created", "run.completed", "run.failed", "run.cancelled", "log.line", "heartbeat"]
+    },
+    "payload": { "type": "object" },
+    "origin": { "enum": ["omnoda", "harness"] }
+  },
+  "additionalProperties": true
+}
