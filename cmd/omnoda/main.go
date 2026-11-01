@@ -24,6 +24,12 @@ func main() {
 	switch os.Args[1] {
 	case "version":
 		fmt.Println("omnoda", protocol.Version)
+	case "seed":
+		seedCmd(os.Args[2:])
+	case "cap":
+		capCmd(os.Args[2:])
+	case "chat":
+		chatCmd(os.Args[2:])
 	case "join":
 		join(os.Args[2:])
 	case "start":
@@ -31,6 +37,9 @@ func main() {
 	case "stop":
 		stop()
 	case "status":
+		if _, err := os.Stat(filepath.Join(dir(), "seed.pid")); err == nil {
+			seedStatus()
+		}
 		status()
 	case "doctor":
 		for _, l := range cfgFrom(os.Args[2:]).Doctor() {
@@ -57,6 +66,9 @@ func main() {
 func usage() {
 	fmt.Fprintf(os.Stderr, `Omnoda node %s
 Usage:
+  omnoda seed [--port 8787]
+  omnoda cap list|inspect|install|enable|disable|test|versions|rollback|export|import
+  omnoda chat
   omnoda join --server URL --code CODE [--name NAME] [--workspace DIR] [--label k=v]
   omnoda start
   omnoda stop

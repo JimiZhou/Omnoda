@@ -35,7 +35,7 @@ type ToolContext struct {
 
 func Run(ctx context.Context, cfg Config, goal string, tools ToolContext, emit func(protocol.Event)) (string, error) {
 	if cfg.APIKey == "" || cfg.BaseURL == "" || cfg.Model == "" {
-		return "", errors.New("native agent model provider is not configured")
+		return "", errNoModel
 	}
 	if cfg.MaxSteps <= 0 || cfg.MaxSteps > 16 {
 		cfg.MaxSteps = 8

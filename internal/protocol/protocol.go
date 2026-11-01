@@ -4,7 +4,7 @@ package protocol
 
 import "time"
 
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // Wire protocol version negotiated on the node websocket.
 const WireVersion = 1

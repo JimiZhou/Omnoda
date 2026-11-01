@@ -133,7 +133,9 @@ func (d *Daemon) session(ctx context.Context) error {
 	}
 	defer conn.Close()
 	hello := d.hello()
-	if err := conn.WriteJSON(protocol.Envelope{V: protocol.WireVersion, Type: protocol.MsgHello, Timestamp: time.Now().UTC(), NodeID: d.nodeID, Payload: mustMap(hello)}); err != nil {
+	w := &wsWriter{conn: conn}
+	conn.SetReadLimit(1 << 20)
+	if err := w.WriteJSON(protocol.Envelope{V: protocol.WireVersion, Type: protocol.MsgHello, Timestamp: time.Now().UTC(), NodeID: d.nodeID, Payload: mustMap(hello)}); err != nil {
 		return err
 	}
 	var ch protocol.Envelope
@@ -148,7 +150,7 @@ func (d *Daemon) session(ctx context.Context) error {
 	resp := protocol.Envelope{V: 1, Type: "node.challenge_response", Timestamp: time.Now().UTC(), Payload: map[string]any{
 		"signature": sig, "enrollment_code": d.Cfg.EnrollmentCode,
 	}}
-	if err := conn.WriteJSON(resp); err != nil {
+	if err := w.WriteJSON(resp); err != nil {
 		return err
 	}
 	// Code is single-use. Do not send it again on reconnect.
@@ -165,7 +167,7 @@ func (d *Daemon) session(ctx context.Context) error {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go d.heartbeats(ctx, conn)
+	go d.heartbeats(ctx, w)
 	for {
 		var env protocol.Envelope
 		if err := conn.ReadJSON(&env); err != nil {
@@ -181,7 +183,7 @@ func (d *Daemon) session(ctx context.Context) error {
 			if json.Unmarshal(b, &spec) != nil {
 				continue
 			}
-			go d.execute(ctx, conn, spec)
+			go d.execute(ctx, w, spec)
 		case protocol.MsgTaskCancel:
 			id, _ := env.Payload["task_id"].(string)
 			d.mu.Lock()
@@ -189,12 +191,12 @@ func (d *Daemon) session(ctx context.Context) error {
 				c()
 			}
 			d.mu.Unlock()
-			_ = conn.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgCancelAck, Timestamp: time.Now().UTC(), Payload: map[string]any{"task_id": id}})
+			_ = w.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgCancelAck, Timestamp: time.Now().UTC(), Payload: map[string]any{"task_id": id}})
 		}
 	}
 }
 
-func (d *Daemon) heartbeats(ctx context.Context, conn *websocket.Conn) {
+func (d *Daemon) heartbeats(ctx context.Context, w *wsWriter) {
 	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
 	for {
@@ -205,18 +207,18 @@ func (d *Daemon) heartbeats(ctx context.Context, conn *websocket.Conn) {
 			d.mu.Lock()
 			n := d.active
 			d.mu.Unlock()
-			_ = conn.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgHeartbeat, Timestamp: time.Now().UTC(), NodeID: d.nodeID, Payload: map[string]any{
+			_ = w.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgHeartbeat, Timestamp: time.Now().UTC(), NodeID: d.nodeID, Payload: map[string]any{
 				"node_id": d.nodeID, "running": n,
 			}})
 		}
 	}
 }
 
-func (d *Daemon) execute(ctx context.Context, conn *websocket.Conn, spec protocol.TaskSpec) {
+func (d *Daemon) execute(ctx context.Context, w *wsWriter, spec protocol.TaskSpec) {
 	d.mu.Lock()
 	if d.active >= 2 {
 		d.mu.Unlock()
-		d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 1, Error: "node concurrency limit"})
+		d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 1, Error: "node concurrency limit"})
 		return
 	}
 	d.active++
@@ -243,7 +245,7 @@ func (d *Daemon) execute(ctx context.Context, conn *websocket.Conn, spec protoco
 		if ev.EventID == "" {
 			ev.EventID = fmt.Sprintf("%s-%d", spec.TaskID, seq)
 		}
-		_ = conn.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgTaskEvent, Timestamp: time.Now().UTC(), Payload: map[string]any{"task_id": spec.TaskID, "event": ev}})
+		_ = w.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgTaskEvent, Timestamp: time.Now().UTC(), Payload: map[string]any{"task_id": spec.TaskID, "event": ev}})
 	}
 	emit(protocol.Event{EventType: protocol.EvRunStarted, Origin: "omnoda", Payload: map[string]any{"kind": spec.Kind}})
 	timeout := time.Duration(spec.TimeoutSec) * time.Second
@@ -254,15 +256,15 @@ func (d *Daemon) execute(ctx context.Context, conn *websocket.Conn, spec protoco
 	defer cancel2()
 	switch spec.Kind {
 	case "harness":
-		d.runHarness(tctx, conn, spec, emit)
+		d.runHarness(tctx, w, spec, emit)
 	case "native":
-		d.runNative(tctx, conn, spec, emit)
+		d.runNative(tctx, w, spec, emit)
 	default:
-		d.runCommand(tctx, conn, spec, emit)
+		d.runCommand(tctx, w, spec, emit)
 	}
 }
 
-func (d *Daemon) runCommand(ctx context.Context, conn *websocket.Conn, spec protocol.TaskSpec, emit func(protocol.Event)) {
+func (d *Daemon) runCommand(ctx context.Context, w *wsWriter, spec protocol.TaskSpec, emit func(protocol.Event)) {
 	argv := []string{}
 	if spec.Command != "" {
 		argv = append(argv, spec.Command)
@@ -297,18 +299,18 @@ func (d *Daemon) runCommand(ctx context.Context, conn *websocket.Conn, spec prot
 	} else {
 		emit(protocol.Event{EventType: protocol.EvRunFailed, Origin: "omnoda", Payload: map[string]any{"error": errStr, "exit_code": res.ExitCode}})
 	}
-	d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: status, ExitCode: res.ExitCode, Output: res.Output, Summary: firstLine(res.Output), Error: errStr})
+	d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: status, ExitCode: res.ExitCode, Output: res.Output, Summary: firstLine(res.Output), Error: errStr})
 }
 
-func (d *Daemon) runHarness(ctx context.Context, conn *websocket.Conn, spec protocol.TaskSpec, emit func(protocol.Event)) {
+func (d *Daemon) runHarness(ctx context.Context, w *wsWriter, spec protocol.TaskSpec, emit func(protocol.Event)) {
 	ad, err := adapters.ByID(spec.HarnessID)
 	if err != nil {
-		d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 127, Error: err.Error()})
+		d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 127, Error: err.Error()})
 		return
 	}
 	det := ad.Detect(ctx)
 	if !det.Info.Present {
-		d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 127, Error: spec.HarnessID + " is not installed: " + det.Info.Error})
+		d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 127, Error: spec.HarnessID + " is not installed: " + det.Info.Error})
 		return
 	}
 	ws := spec.Workspace
@@ -317,17 +319,17 @@ func (d *Daemon) runHarness(ctx context.Context, conn *websocket.Conn, spec prot
 	}
 	if ws != "" {
 		if _, err := d.pol.ResolveWorkspace(ws); err != nil {
-			d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 126, Error: err.Error()})
+			d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 126, Error: err.Error()})
 			return
 		}
 	}
 	if spec.Level == protocol.LevelReadOnly {
-		d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 126, Error: "harness runs require WORKSPACE_WRITE approval"})
+		d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 126, Error: "harness runs require WORKSPACE_WRITE approval"})
 		return
 	}
 	res, err := ad.Start(ctx, adapters.RunRequest{RunID: spec.TaskID, Prompt: spec.Prompt, Workspace: ws, Timeout: time.Duration(spec.TimeoutSec) * time.Second}, emit)
 	if err != nil {
-		d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, Error: err.Error()})
+		d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, Error: err.Error()})
 		return
 	}
 	status := protocol.TaskSucceeded
@@ -341,12 +343,12 @@ func (d *Daemon) runHarness(ctx context.Context, conn *websocket.Conn, spec prot
 			status = protocol.TaskTimedOut
 		}
 	}
-	d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: status, ExitCode: res.ExitCode, Summary: res.Summary, Output: res.Summary, Error: errStr, Session: res.Session})
+	d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: status, ExitCode: res.ExitCode, Summary: res.Summary, Output: res.Summary, Error: errStr, Session: res.Session})
 }
 
-func (d *Daemon) runNative(ctx context.Context, conn *websocket.Conn, spec protocol.TaskSpec, emit func(protocol.Event)) {
+func (d *Daemon) runNative(ctx context.Context, w *wsWriter, spec protocol.TaskSpec, emit func(protocol.Event)) {
 	if d.Cfg.ModelAPIKey == "" || d.Cfg.ModelBaseURL == "" {
-		d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 1, Error: "native agent model provider is not configured"})
+		d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, ExitCode: 1, Error: "native agent model provider is not configured"})
 		return
 	}
 	ws := spec.Workspace
@@ -358,14 +360,14 @@ func (d *Daemon) runNative(ctx context.Context, conn *websocket.Conn, spec proto
 		MaxSteps: 8, Timeout: time.Duration(spec.TimeoutSec) * time.Second, TokenBudget: 8000,
 	}, spec.Prompt, agent.ToolContext{Policy: d.pol, Workspace: ws}, emit)
 	if err != nil {
-		d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, Error: err.Error()})
+		d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskFailed, Error: err.Error()})
 		return
 	}
-	d.finish(conn, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskSucceeded, Summary: answer, Output: answer})
+	d.finish(w, protocol.TaskResult{TaskID: spec.TaskID, Status: protocol.TaskSucceeded, Summary: answer, Output: answer})
 }
 
-func (d *Daemon) finish(conn *websocket.Conn, res protocol.TaskResult) {
-	_ = conn.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgTaskResult, Timestamp: time.Now().UTC(), Payload: mustMap(res)})
+func (d *Daemon) finish(w *wsWriter, res protocol.TaskResult) {
+	_ = w.WriteJSON(protocol.Envelope{V: 1, Type: protocol.MsgTaskResult, Timestamp: time.Now().UTC(), Payload: mustMap(res)})
 }
 
 func (d *Daemon) hello() protocol.NodeHello {

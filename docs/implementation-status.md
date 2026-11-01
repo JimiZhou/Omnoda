@@ -1,6 +1,24 @@
 # Implementation status
 
-Updated as the POC was built. Items marked tested were exercised by `go test` on Linux amd64 unless noted.
+Updated for v0.2 seed work. Items marked tested were exercised by `go test` on Linux amd64 unless noted.
+
+| Area | State | Evidence | Open |
+|---|---|---|---|
+| AES-256-GCM seal and legacy migration | done | auth tests | |
+| Node and hub websocket single writer | done | code review; race not separately timed | |
+| Seed bootstrap, loopback bind, idempotent registry | tested | seed test | browser walkthrough of the new pages |
+| Capability manifest, registry, enable, rollback | tested | registry tests | |
+| Sandbox refuses untrusted code without bwrap | tested | sandbox test | bwrap denial of a host file runs only when bwrap is installed |
+| Evolver state machine, split tests, approval | tested | evolver tests, fixture generator | real model generation not run; no API key in this environment |
+| Capability export/import | implemented | packaging package | second-node import not run |
+| Web capabilities and evolution pages | implemented | typecheck required | Playwright not run |
+| v0.1 node, task, harness paths | kept | existing tests | |
+
+## Not done, and not claimed
+
+- A live model call that authors a capability. Fixture generation is labeled as a test double.
+- macOS, Windows, and arm64 device runs.
+- Playwright and phone browsers.
 
 | Area | State | Evidence | Open |
 |---|---|---|---|

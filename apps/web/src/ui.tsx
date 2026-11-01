@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { api, loadCSRF, setCSRF, type Approval, type NodeInfo, type TaskRow } from "./api";
+import { api, loadCSRF, setCSRF, type Approval, type Capability, type Evolution, type NodeInfo, type TaskRow } from "./api";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -9,6 +9,8 @@ function Shell({ children }: { children: React.ReactNode }) {
         <div className="brand">Omnoda</div>
         <div className="slogan">Every Device. One Mind.</div>
         <NavLink to="/" end>Chat</NavLink>
+        <NavLink to="/capabilities">Capabilities</NavLink>
+        <NavLink to="/evolution">Evolution</NavLink>
         <NavLink to="/nodes">Nodes</NavLink>
         <NavLink to="/workflows">Workflows</NavLink>
         <NavLink to="/history">History</NavLink>
@@ -17,6 +19,7 @@ function Shell({ children }: { children: React.ReactNode }) {
       <main>{children}</main>
       <nav className="bottom">
         <Link to="/">Chat</Link>
+        <Link to="/capabilities">Caps</Link>
         <Link to="/nodes">Nodes</Link>
         <Link to="/workflows">Flows</Link>
         <Link to="/settings">Settings</Link>
@@ -45,6 +48,8 @@ export function App() {
     <Shell>
       <Routes>
         <Route path="/" element={<Chat />} />
+        <Route path="/capabilities" element={<Capabilities />} />
+        <Route path="/evolution" element={<EvolutionPage />} />
         <Route path="/nodes" element={<Nodes />} />
         <Route path="/nodes/:id" element={<NodeDetail />} />
         <Route path="/workflows" element={<Workflows />} />
@@ -94,6 +99,61 @@ function Login({ onDone }: { onDone: () => void }) {
   );
 }
 
+function Capabilities() {
+  const [rows, setRows] = useState<Capability[]>([]);
+  const [err, setErr] = useState("");
+  const load = () => api.capabilities().then((r) => setRows(r.capabilities || [])).catch((e) => setErr(e.message));
+  useEffect(() => { load(); }, []);
+  return (
+    <div>
+      <h2>Capabilities</h2>
+      <p className="muted">Installed packages stay on disk. Enabling a generated capability requires a passed verification record.</p>
+      {err && <p>{err}</p>}
+      {rows.length === 0 && <p className="muted">No capabilities registered.</p>}
+      {rows.map((c) => (
+        <div className="card" key={c.content_hash}>
+          <strong>{c.capability_id}</strong> <span className="pill">{c.version}</span> <span className="pill">{c.activation_status}</span>
+          <p className="muted">{c.manifest?.metadata?.description}</p>
+          <p className="muted">origin {c.origin} · verify {c.verification_status} · {(c.manifest?.spec?.platforms || []).join(", ")} · network {String(c.manifest?.spec?.permissions?.network)}</p>
+          {c.activation_status === "enabled" && <button onClick={async () => { await api.disableCapability(c.capability_id); load(); }}>Disable</button>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EvolutionPage() {
+  const [rows, setRows] = useState<Evolution[]>([]);
+  const [err, setErr] = useState("");
+  const load = () => api.evolutions().then((r) => setRows(r.evolutions || [])).catch((e) => setErr(e.message));
+  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, []);
+  return (
+    <div>
+      <h2>Evolution</h2>
+      <p className="muted">A new capability stays inactive until you approve it. Verification failure never enables it.</p>
+      {err && <p>{err}</p>}
+      {rows.length === 0 && <p className="muted">No evolutions yet.</p>}
+      {rows.map((e) => (
+        <div className="card" key={e.evolution_id}>
+          <strong>{e.state}</strong> <span className="muted">{e.evolution_id}</span>
+          <p>{e.original_goal}</p>
+          {e.capability_id && <p className="muted">{e.capability_id} {e.generated_version}</p>}
+          {e.error && <p className="pill failed">{e.error}</p>}
+          <ol>
+            {(e.evidence || []).map((ev, i) => <li key={i}><b>{ev.phase}</b> — {ev.detail}</li>)}
+          </ol>
+          {e.state === "awaiting_approval" && (
+            <div className="row">
+              <button className="primary" onClick={async () => { await api.approveEvolution(e.evolution_id); load(); }}>Approve</button>
+              <button onClick={async () => { await api.rejectEvolution(e.evolution_id); load(); }}>Reject</button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Chat() {
   const [goal, setGoal] = useState("检查 ARM 服务器上的 Demo 服务。如果异常，让 Mac 上的 Claude Code 修复代码，然后到 Windows 工作站运行测试。");
   const [planner, setPlanner] = useState("template");
@@ -107,7 +167,7 @@ function Chat() {
   return (
     <div>
       <h2>Chat</h2>
-      <p className="muted">Template planner runs the known diagnose → fix → test workflow. LLM planner is labeled separately and only runs when a model is configured.</p>
+      <p className="muted">Seed runs on this machine. Without a model provider, autonomous planning and capability generation stay unavailable. Installed capabilities still run.</p>
       <div className="card">
         <label className="muted">Goal</label>
         <textarea rows={4} value={goal} onChange={(e) => setGoal(e.target.value)} />
