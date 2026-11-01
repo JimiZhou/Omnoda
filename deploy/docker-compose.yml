@@ -1,0 +1,16 @@
+services:
+  omnoda:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      OMNODA_ADDR: ":8787"
+      OMNODA_DATA: /data
+      OMNODA_PUBLIC_URL: ${OMNODA_PUBLIC_URL:-http://127.0.0.1:8787}
+    volumes:
+      - omnoda-data:/data
+    restart: unless-stopped
+volumes:
+  omnoda-data:

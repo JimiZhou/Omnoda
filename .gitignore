@@ -1,0 +1,17 @@
+bin/
+dist/
+data/
+*.db
+*.db-journal
+node_modules/
+apps/web/dist/
+apps/web/node_modules/
+.env
+*.log
+coverage/
+playwright-report/
+test-results/
+release/artifacts/
+.omnoda/
+
+bin/

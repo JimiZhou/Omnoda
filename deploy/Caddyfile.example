@@ -1,0 +1,7 @@
+# Terminate TLS in front of Omnoda. Do not publish the admin port without auth.
+# The process itself requires a login session. HTTPS is still required on the public internet
+# so the session cookie can be Secure and the node socket is WSS.
+example.com {
+  encode gzip
+  reverse_proxy 127.0.0.1:8787
+}

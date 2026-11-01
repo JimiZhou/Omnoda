@@ -1,0 +1,5 @@
+{
+  "goal": "Check the ARM demo service. If it is unhealthy, fix it on the Mac with Claude Code, then run tests on Windows.",
+  "planner": "template",
+  "notes": "The control plane builds this plan from the goal text. This file documents the shape. It is not executed as a mock result."
+}

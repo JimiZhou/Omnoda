@@ -1,0 +1,65 @@
+openapi: 3.0.3
+info:
+  title: Omnoda Control Plane API
+  version: 0.1.0
+paths:
+  /api/v1/auth/login:
+    post:
+      summary: Create a browser session
+  /api/v1/auth/logout:
+    post:
+      summary: End the browser session
+  /api/v1/auth/me:
+    get:
+      summary: Current session
+  /api/v1/nodes:
+    get:
+      summary: List enrolled nodes
+  /api/v1/nodes/{id}:
+    get:
+      summary: Node detail
+    delete:
+      summary: Revoke a node
+  /api/v1/nodes/{id}/capabilities:
+    get:
+      summary: Capabilities and harnesses
+  /api/v1/nodes/enrollment-codes:
+    post:
+      summary: Create a one-time enrollment code
+  /api/v1/tasks:
+    post:
+      summary: Dispatch a task to an online node
+    get:
+      summary: List tasks
+  /api/v1/tasks/{id}:
+    get:
+      summary: Task status
+  /api/v1/tasks/{id}/cancel:
+    post:
+      summary: Cancel a task
+  /api/v1/workflows:
+    post:
+      summary: Plan and start a workflow
+    get:
+      summary: List workflows
+  /api/v1/workflows/{id}:
+    get:
+      summary: Workflow, steps, and report
+  /api/v1/workflows/{id}/cancel:
+    post:
+      summary: Cancel a workflow
+  /api/v1/approvals/{id}/approve:
+    post:
+      summary: Approve one bound action
+  /api/v1/approvals/{id}/reject:
+    post:
+      summary: Reject one bound action
+  /api/v1/artifacts/{id}:
+    get:
+      summary: Artifact metadata
+  /api/v1/audit:
+    get:
+      summary: Audit log
+  /api/v1/node/ws:
+    get:
+      summary: Node websocket. Requires enrollment or a known device key. Not a public RPC endpoint.
