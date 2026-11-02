@@ -1,19 +1,42 @@
-# Security review v0.3 — generated code
+# Security review v0.3
 
-## Finding
+## Trust boundary
 
-`internal/evolver/tests_split.go` previously ran `builder_test.py` and `verifier_test.py` with `exec.Command("python3")` on the host. The generated package also supplied `verifier/expected.json`, so a model could satisfy its own verifier.
+Model-generated code, scripts, tests, and fixtures are untrusted input.
 
-## Change
+| Piece | Who owns it | Used for the verdict |
+|---|---|---|
+| Candidate entrypoint and `builder_test.py` | Model or fixture generator | No |
+| `verifier_test.py` and generated `expected.json` | Model or fixture generator | No |
+| Sensor-log input and expected counts | System, in `internal/evolver/verify.go` | Yes |
+| Comparison of `result.json` | System verifier | Yes |
+| Bubblewrap policy | System | Execution confinement |
 
-Both scripts go through `sandbox.Select`. The policy is no network, cleared environment, work directory mount, timeout, and output cap. Missing backend returns an error and the evolution fails. The status is not `passed`.
+The system verifier copies only the candidate entrypoint into a fresh work directory. The golden log is a read-only mount. Expected counts never enter the sandbox. A missing trusted contract does not become `VerifyPassed`.
 
-Before the verifier runs, the evolver overwrites `verifier/expected.json` with the system fixture and restores the generated file afterward. Verification status `passed` requires the independent run and the static security check. Anything short of that is `unverified`. `POST /capabilities/{id}/activate` rejects `unverified`, `failed`, and `none` unless the origin is `builtin`.
+Builder success is stored as a diagnostic bit. Activation requires `VerifyPassed`, and `SetStatus` re-hashes the package first. If the new version cannot be marked enabled, the previously enabled version stays enabled.
 
-## Evidence
+## Fixes in this round
 
-`go test ./internal/evolver/ ./internal/sandbox/` on Linux amd64 with bwrap. `TestHostileGeneratedScriptsStayInsideSandbox` checks a host marker, an outside write, a network call, and a tight loop. `TestBwrapDeniesHostFile` and `TestBwrapDeniesWriteAndNetwork` cover the backend. `TestNoBackendRefusesGeneratedScript` skips when bwrap exists and fails closed otherwise.
+- Generated tests no longer decide verification by exiting 0 or printing `success`.
+- No sandbox backend: the candidate is not executed and verification fails closed.
+- CI `go` job does not need bubblewrap. CI `sandbox` job fails with `SANDBOX=BLOCKED` when the user namespace probe fails.
+- Task reads, events, runs, cancel, and artifacts check the owner. An empty legacy `owner_id` is not granted to a logged-in user.
+- Idempotency is unique per owner. A different body with the same key is a conflict. Another user does not see the row.
+- A terminal task status is not replaced by a later runner write.
+- Seed does not report system info for a goal it cannot classify.
 
-## Still open
+## Evidence the boundary was not lowered
 
-macOS and Windows have no backend here. That is a refusal, not a measurement on those operating systems. The seal for model keys remains AES-256-GCM with a local key file, as in v0.2.
+- `internal/sandbox` still returns `ErrUnavailable` when bubblewrap is absent. There is no host `python3` fallback.
+- macOS and Windows still have no generated-code backend.
+- Enrollment codes stay hashed. Model keys stay in the existing seal. This round did not add a plaintext key path.
+- The seed log from the clean-root run did not contain the administrator password.
+
+## Residual risk
+
+- The trusted contract covers `local.sensor-log` only. Other generated packages remain disabled.
+- GitHub-hosted runners may be unable to run the isolation tests. That is recorded as blocked, and the isolation proof stays on a Linux host with a working user namespace.
+- Resource checks are per task owner. The product is still a single-admin seed. A future multi-user mode needs the same checks on every new route.
+- Codex `--ephemeral` and Claude print mode are not durable sessions. A live agent run was not performed.
+- Static `securityCheck` is a hint. The sandbox and the system verifier are the controls that decide execution and activation.

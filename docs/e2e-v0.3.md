@@ -1,23 +1,55 @@
 # E2E matrix v0.3
 
-Recorded against Linux amd64 (`uname` host in the gate report). Real ARM, macOS, Windows, and iPhone runs are not in this workspace.
+Statuses mean what was actually observed.
 
-| ID | Result | Evidence |
+- UNIT VERIFIED: `go test` on this Linux amd64 host.
+- INTEGRATION VERIFIED: a real process on this host, not a fixture standing in for that process.
+- DEVICE VERIFIED: the named physical machine. None of those rows are device verified in this round.
+- BLOCKED: the environment cannot run the check. This is not a pass.
+
+Host for the integration rows: Linux x86_64, bubblewrap 0.11.1, Go toolchain in this workspace. Clean seed root `/tmp/omnoda-seed-v03b`.
+
+| Check | Status | Evidence |
 |---|---|---|
-| T01 | PASS on this Linux host with bwrap | `go test ./internal/evolver/ ./internal/sandbox/` |
-| T02 | UNVERIFIED on macOS/Windows hardware. Code path refuses when `Select` is none | `sandbox.Select`, executor `ErrSandbox` |
-| T03 | BLOCKED. No clean desktop image in this session | seed bootstrap unit test only |
-| T04 | PARTIAL. Missing model returns `no_model`. A wrong live key was not called | `agentRun` |
-| T05 | BLOCKED. No provider credential | |
-| T06 | PARTIAL. Supervisor test keeps the task after the caller returns. No phone | `internal/supervisor` |
-| T07 | PARTIAL. Idempotency and event sequence covered in unit tests | |
-| T08 | PASS in unit test for restart classification | `TestRestartMarksSideEffectUncertain` |
-| T09 | unchanged approval row binding from v0.1 | |
-| T10 | BLOCKED. One Linux machine | |
-| T11 | BLOCKED. No live Codex/Claude prompt in this session | |
-| T12 | PARTIAL. Fixture evolution is labeled fixture. Live generation not run | |
-| T13 | BLOCKED. No iPhone | |
-| T14 | covered by existing enrollment tests on this host | |
-| T15 | see gate report for the command output | |
+| Generated script cannot run without a sandbox | UNIT VERIFIED | `TestNoBackendRefusesGeneratedScript` skips here because bwrap exists. `TestFixtureEvolutionFailClosed` covers the other branch. |
+| Real bubblewrap isolation | INTEGRATION VERIFIED | `go test ./internal/evolver/ ./internal/sandbox/ -count=1` on this host. Includes host-file, write, network, and loop cases. |
+| GitHub-hosted runner isolation | BLOCKED until the `sandbox` job probe passes | Hosted runners often lack a user namespace. The job prints `SANDBOX=BLOCKED` and fails. It does not report pass. |
+| Sensor-log independent verifier | INTEGRATION VERIFIED | System fixture, not `verifier_test.py`. Wrong candidate and always-pass verifier fail. |
+| Capability with no trusted contract | UNIT VERIFIED | Stored `unverified`, enable rejected. |
+| Linux seed, no third-party agent required | INTEGRATION VERIFIED | Clean root, admin created, `omnoda.system-info` returned `linux/amd64`. |
+| Unsupported and missing goals | INTEGRATION VERIFIED | `capability_missing`, `unsupported`. No system-info success for those goals. |
+| No model configured | INTEGRATION VERIFIED | `POST /api/v1/agent/run` returned `no_model`. |
+| Idempotent retry and conflict | INTEGRATION VERIFIED | Same key and body: HTTP 200, same `task_id`. Different body: HTTP 409. |
+| Restart keeps conversation and capabilities | INTEGRATION VERIFIED | Second process, same root, messages and `omnoda.system-info` present. |
+| HTTP disconnect does not cancel | UNIT VERIFIED | Supervisor test. Browser close was not clicked. |
+| Cancel beats a late success | UNIT VERIFIED | `TestCancelBeatsALateSuccess`. |
+| Restart of a running task | UNIT VERIFIED | Status `uncertain`, open run `uncertain`, queued read-only task stays queued. |
+| Linux ARM64 device | BLOCKED | No ARM board. Cross compile is not device verification. |
+| macOS Apple Silicon device | BLOCKED | No Mac. Expected: seed starts, node registers, generated execution returns sandbox unavailable. |
+| Windows x86_64 device | BLOCKED | No Windows machine. Expected: binary starts, node registers, builtin system info works, generated execution is refused. |
+| Live Codex or Claude Code continuity | BLOCKED | CLIs are installed. No prompt was sent. `--ephemeral` is not session resume. The supervisor runs builtin goals only. |
+| Live model authoring a capability | BLOCKED | No provider key. Fixture generator is a test double. |
+| iPhone voice | BLOCKED | Out of scope for this round. |
 
-Do not read a unit test as a three-device or phone pass.
+## Device commands
+
+Run these on the named machine. Record the exit code. Do not treat a cross-compiled binary as a device pass.
+
+Linux ARM64 and a second Linux amd64:
+
+```bash
+go test ./...
+go test ./internal/evolver/ ./internal/sandbox/ -count=1
+omnoda seed --root /tmp/omnoda-clean --port 8791
+```
+
+Expected: unit tests pass. On a host with a working `bwrap` user namespace the sandbox tests pass. Without `bwrap`, generated execution fails closed and the sandbox-dependent tests skip. Seed answers a system-info goal with `linux/<arch>` and rejects an unknown goal.
+
+macOS Apple Silicon and Windows x86_64:
+
+```bash
+go test ./...
+omnoda seed --root /tmp/omnoda-clean --port 8791
+```
+
+Expected: `sandbox.Select` is not available, so a generated package is not executed. Seed still serves the builtin system-info capability. A missing capability returns `capability_missing`.
