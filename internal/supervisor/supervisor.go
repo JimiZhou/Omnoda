@@ -5,6 +5,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -41,11 +42,16 @@ func (s *Supervisor) Start(row storage.TaskRow, spec protocol.TaskSpec) {
 	s.mu.Unlock()
 	go func() {
 		defer func() {
+			if rec := recover(); rec != nil {
+				_ = s.DB.SetTaskStatus(row.ID, protocol.TaskFailed, 1, "", "", "supervisor panicked")
+			}
 			s.mu.Lock()
 			delete(s.active, row.ID)
 			s.mu.Unlock()
 		}()
-		_ = s.DB.SetTaskStatus(row.ID, protocol.TaskRunning, 0, "", "", "")
+		if err := s.DB.SetTaskStatus(row.ID, protocol.TaskRunning, 0, "", "", ""); err != nil && errors.Is(err, storage.ErrTerminal) {
+			return
+		}
 		run, err := s.DB.StartRun(row.ID, row.NodeID, spec.HarnessID)
 		if err != nil {
 			_ = s.DB.SetTaskStatus(row.ID, protocol.TaskFailed, 1, "", "", err.Error())
@@ -55,8 +61,12 @@ func (s *Supervisor) Start(row storage.TaskRow, spec protocol.TaskSpec) {
 		if res.TaskID == "" {
 			res.TaskID = row.ID
 		}
+		// A user cancel wins over a late success. The terminal write is conditional.
+		if err := s.DB.SetTaskStatus(row.ID, res.Status, res.ExitCode, res.Summary, "", res.Error); errors.Is(err, storage.ErrTerminal) {
+			_ = s.DB.FinishRun(run.ID, string(protocol.TaskCancelled), res.Summary, "", false)
+			return
+		}
 		_ = s.DB.FinishRun(run.ID, string(res.Status), res.Summary, "", false)
-		_ = s.DB.SetTaskStatus(row.ID, res.Status, res.ExitCode, res.Summary, "", res.Error)
 		seq, _ := s.DB.NextEventSeq(row.ID)
 		_ = s.DB.AppendEventOnce(protocol.Event{
 			EventType: protocol.EvRunCompleted, Sequence: seq, Timestamp: time.Now().UTC(),
