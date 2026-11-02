@@ -23,6 +23,14 @@ The executor does not start a shell. Arguments are argv. `..` paths and symlinks
 
 Model JSON cannot widen policy. Native tools call `policy.CheckCommand` and `runtime.SafeJoin`. Audit details that contain `token`, `password`, `secret`, or `api_key` are stored as `[redacted]`.
 
+## Generated code
+
+Model output, imported packages, and `builder_test.py` / `verifier_test.py` run only through `internal/sandbox`. On Linux the backend is bubblewrap with `--unshare-all`, `--clearenv`, no network, and a timeout. A builder test is a self-test. The independent expected fixture is owned by the evolver and written over any generated `verifier/expected.json` before verification. A candidate that cannot be isolated is stored as `unverified` and the activate API rejects it.
+
+macOS and Windows have no backend in this release. `sandbox.Select` returns none, and packaged capability execution returns `untrusted capability refused: sandbox unavailable`. The task can be sent to an enrolled Linux node that has bubblewrap. It is not executed with a host `python3`.
+
+If `bwrap` is absent on Linux, the same refusal applies. Tests skip the live isolation proof and still assert the fail-closed result. A skip is not a pass.
+
 ## Known POC limits
 
 - The local model-key seal is XOR with a SHA-256 keystream from `seal.key`, not an OS keystore.

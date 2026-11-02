@@ -186,19 +186,30 @@ func (s *Store) step(ctx context.Context, rec Record, gen Generator) (Record, er
 		return rec, nil
 	case StTesting:
 		rec.State = StVerifying
+		restore, err := sealIndependentFixture(rec.PackageDir, trustedSensorFixture())
+		if err != nil {
+			return rec, err
+		}
 		ok, detail := runVerifier(rec.PackageDir)
+		restore()
 		rec.TestsRun = append(rec.TestsRun, "verifier")
 		rec.TestResults["verifier"] = ok
+		// Builder success is self-test only. Independent verification is a separate bit.
 		rec.TestResults["functional_pass"] = ok
 		rec.TestResults["schema_pass"] = true
 		rec.TestResults["security_pass"] = securityCheck(rec.PackageDir)
+		rec.TestResults["independent"] = ok
 		rec.Evidence = append(rec.Evidence, Evidence{Phase: "verifying", Detail: detail, At: time.Now().UTC()})
 		if !ok || !rec.TestResults["security_pass"] {
 			return rec, errors.New("verifier failed: " + detail)
 		}
 		return rec, nil
 	case StVerifying:
-		installed, err := s.Reg.Install(rec.PackageDir, "evolver", "omnoda-evolver", registry.VerifyPassed)
+		verify := registry.VerifyUnverified
+		if rec.TestResults["independent"] && rec.TestResults["security_pass"] && rec.TestResults["verifier"] {
+			verify = registry.VerifyPassed
+		}
+		installed, err := s.Reg.Install(rec.PackageDir, "evolver", "omnoda-evolver", verify)
 		if err != nil {
 			return rec, err
 		}

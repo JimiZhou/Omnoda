@@ -29,9 +29,10 @@ const (
 type Verify string
 
 const (
-	VerifyNone   Verify = "none"
-	VerifyPassed Verify = "passed"
-	VerifyFailed Verify = "failed"
+	VerifyNone       Verify = "none"
+	VerifyPassed     Verify = "passed"
+	VerifyFailed     Verify = "failed"
+	VerifyUnverified Verify = "unverified"
 )
 
 type Record struct {

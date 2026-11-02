@@ -22,6 +22,9 @@ import (
 
 var ErrUnavailable = errors.New("no sandbox backend meets policy on this platform")
 
+// runtimeOS is the OS used by Select. Tests do not change it.
+var runtimeOS = runtime.GOOS
+
 type Request struct {
 	Argv        []string
 	WorkDir     string // writable workspace inside the sandbox
@@ -47,7 +50,7 @@ type Backend interface {
 }
 
 func Select() Backend {
-	if runtime.GOOS == "linux" {
+	if runtimeOS == "linux" {
 		b := bwrapBackend{}
 		if b.Available() {
 			return b
