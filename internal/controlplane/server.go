@@ -28,6 +28,7 @@ import (
 	"github.com/JimiZhou/Omnoda/internal/protocol"
 	"github.com/JimiZhou/Omnoda/internal/scheduler"
 	"github.com/JimiZhou/Omnoda/internal/storage"
+	"github.com/JimiZhou/Omnoda/internal/supervisor"
 	"github.com/JimiZhou/Omnoda/internal/workflow"
 	"github.com/gorilla/websocket"
 )
@@ -45,6 +46,7 @@ type Server struct {
 	// Caps and Evos are set by the seed runtime. They stay nil on a plain server.
 	Caps *registry.Registry
 	Evos *evolver.Store
+	jobs *supervisor.Supervisor
 }
 
 func New(db *storage.DB, dataDir, publicURL, version string) (*Server, error) {
@@ -62,11 +64,16 @@ func New(db *storage.DB, dataDir, publicURL, version string) (*Server, error) {
 	s.engine = workflow.New(db, &hubRunner{s: s})
 	s.engine.Load = s.candidates
 	s.mux = http.NewServeMux()
+	s.wireJobs()
 	s.routes()
 	if _, err := db.RecoverInflight(); err != nil {
 		return nil, err
 	}
 	_ = db.MarkOfflineAll()
+	// The seed local node is this process. Remote nodes stay offline until they reconnect.
+	if id, _, err := db.SeedLocal(); err == nil && id != "" {
+		_ = db.TouchNode(id, protocol.NodeOnline)
+	}
 	return s, nil
 }
 
@@ -118,6 +125,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/evolutions/{id}/approve", s.authed(s.approveEvo))
 	s.mux.HandleFunc("POST /api/v1/evolutions/{id}/reject", s.authed(s.rejectEvo))
 	s.mux.HandleFunc("POST /api/v1/agent/run", s.authed(s.agentRun))
+	s.mux.HandleFunc("POST /api/v1/conversations", s.authed(s.createConversation))
+	s.mux.HandleFunc("GET /api/v1/conversations", s.authed(s.listConversations))
+	s.mux.HandleFunc("GET /api/v1/conversations/{id}", s.authed(s.getConversation))
+	s.mux.HandleFunc("POST /api/v1/conversations/{id}/messages", s.authed(s.postMessage))
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/runs", s.authed(s.taskRuns))
 	s.mux.HandleFunc("GET /api/v1/node/ws", s.nodeWS)
 	s.mux.HandleFunc("GET /install.sh", s.installSh)
 	s.mux.HandleFunc("GET /install.ps1", s.installPS)
@@ -433,6 +445,10 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("after") {
+		s.taskEventsCursor(w, r)
+		return
+	}
 	ev, err := s.DB.Events(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 500, "db", err.Error())
@@ -452,6 +468,9 @@ func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if t.NodeID != "" {
 		_ = s.hub.cancel(t.NodeID, t.ID)
+	}
+	if s.jobs != nil {
+		s.jobs.Cancel(t.ID)
 	}
 	if t.Status == protocol.TaskRunning || t.Status == protocol.TaskQueued {
 		_ = s.DB.SetTaskStatus(t.ID, protocol.TaskCancelled, 130, "cancelled by user", t.Output, "")

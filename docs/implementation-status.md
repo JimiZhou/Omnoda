@@ -1,6 +1,6 @@
 # Implementation status
 
-Updated for v0.2 seed work. Items marked tested were exercised by `go test` on Linux amd64 unless noted.
+Updated while v0.3 continuity work is in the working tree. Items marked tested were exercised by `go test` on Linux amd64 unless noted. v0.3 phone, ARM, macOS, and Windows rows are in `docs/e2e-v0.3.md` and are not marked passed here.
 
 | Area | State | Evidence | Open |
 |---|---|---|---|

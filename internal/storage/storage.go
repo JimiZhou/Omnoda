@@ -183,7 +183,7 @@ func (d *DB) migrate() error {
 		}
 	}
 	_, _ = d.sql.Exec(`INSERT OR IGNORE INTO schema_migrations(version) VALUES (1)`)
-	return nil
+	return d.migrateV2()
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -564,15 +564,15 @@ func (d *DB) ListTasks(limit int) ([]TaskRow, error) {
 
 // RecoverInflight marks running tasks uncertain so a restart cannot replay side effects.
 func (d *DB) RecoverInflight() (int, error) {
-	res, err := d.sql.Exec(`UPDATE tasks SET status=?, error=COALESCE(error,'') || ' server restarted while running', updated_at=? WHERE status IN ('running','queued')`,
+	// A running task may already have caused a side effect. It becomes uncertain
+	// and is not replayed. A queued task that never started can be scheduled again
+	// only when side_effect is 0.
+	res, err := d.sql.Exec(`UPDATE tasks SET status=?, error=COALESCE(error,'') || ' server restarted while running', updated_at=? WHERE status='running' OR (status='queued' AND side_effect=1)`,
 		protocol.TaskUncertain, now())
 	if err != nil {
 		return 0, err
 	}
-	// Queued tasks that never started are safe to leave queued only if they have no node binding.
-	// We already marked all queued uncertain. Re-queue ones with empty node and never-started.
-	_, err = d.sql.Exec(`UPDATE tasks SET status=? WHERE status=? AND (node_id IS NULL OR node_id='') AND error LIKE '%server restarted%'`,
-		protocol.TaskQueued, protocol.TaskUncertain)
+	_, err = d.sql.Exec(`UPDATE tasks SET error='' WHERE status=? AND side_effect=0`, protocol.TaskQueued)
 	if err != nil {
 		return 0, err
 	}

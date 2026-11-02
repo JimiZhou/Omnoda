@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { api, loadCSRF, setCSRF, type Approval, type Capability, type Evolution, type NodeInfo, type TaskRow } from "./api";
+import { api, loadCSRF, setCSRF, type Approval, type Capability, type Conversation, type Evolution, type Msg, type NodeInfo, type TaskRow } from "./api";
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
@@ -8,20 +8,16 @@ function Shell({ children }: { children: React.ReactNode }) {
       <nav className="side">
         <div className="brand">Omnoda</div>
         <div className="slogan">Every Device. One Mind.</div>
-        <NavLink to="/" end>Chat</NavLink>
-        <NavLink to="/capabilities">Capabilities</NavLink>
-        <NavLink to="/evolution">Evolution</NavLink>
-        <NavLink to="/nodes">Nodes</NavLink>
-        <NavLink to="/workflows">Workflows</NavLink>
-        <NavLink to="/history">History</NavLink>
+        <NavLink to="/" end>Home</NavLink>
+        <NavLink to="/tasks">Tasks</NavLink>
+        <NavLink to="/decisions">Decisions</NavLink>
         <NavLink to="/settings">Settings</NavLink>
       </nav>
       <main>{children}</main>
       <nav className="bottom">
-        <Link to="/">Chat</Link>
-        <Link to="/capabilities">Caps</Link>
-        <Link to="/nodes">Nodes</Link>
-        <Link to="/workflows">Flows</Link>
+        <Link to="/">Home</Link>
+        <Link to="/tasks">Tasks</Link>
+        <Link to="/decisions">Decisions</Link>
         <Link to="/settings">Settings</Link>
       </nav>
     </div>
@@ -47,7 +43,9 @@ export function App() {
   return (
     <Shell>
       <Routes>
-        <Route path="/" element={<Chat />} />
+        <Route path="/" element={<Home />} />
+        <Route path="/tasks" element={<History />} />
+        <Route path="/decisions" element={<Decisions />} />
         <Route path="/capabilities" element={<Capabilities />} />
         <Route path="/evolution" element={<EvolutionPage />} />
         <Route path="/nodes" element={<Nodes />} />
@@ -150,6 +148,78 @@ function EvolutionPage() {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+function Home() {
+  const [text, setText] = useState("");
+  const [conv, setConv] = useState<Conversation | null>(null);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [task, setTask] = useState<TaskRow | null>(null);
+  const [err, setErr] = useState("");
+  const [advanced, setAdvanced] = useState(false);
+  const refresh = async (id: string) => {
+    const data = await api.conversation(id);
+    setConv(data.conversation);
+    setMessages(data.messages || []);
+  };
+  useEffect(() => {
+    api.conversations().then(async (r) => {
+      const first = (r.conversations || [])[0];
+      if (first) await refresh(first.id);
+    }).catch((e) => setErr(e.message));
+  }, []);
+  useEffect(() => {
+    const last = [...messages].reverse().find((m) => m.task_id);
+    if (!last?.task_id) return;
+    const tick = () => api.taskDetail(last.task_id!).then((t) => setTask(t.task)).catch(() => {});
+    tick();
+    const timer = setInterval(tick, 2000);
+    return () => clearInterval(timer);
+  }, [messages]);
+  return (
+    <div>
+      <h2>What should Omnoda do?</h2>
+      <p className="muted">This computer can report its own system info without another agent. A model is optional. Closing this page does not cancel a running task.</p>
+      {err && <p className="pill failed">{err}</p>}
+      <div className="card">
+        {messages.length === 0 && <p className="muted">No messages yet.</p>}
+        {messages.map((m) => (
+          <p key={m.id}><strong>{m.role}</strong> {m.content}</p>
+        ))}
+        {task && <p>Current task <span className="pill">{task.Status}</span> <span className="muted">{task.ID}</span> {task.Summary || task.Error}</p>}
+      </div>
+      <form className="card" onSubmit={async (e) => {
+        e.preventDefault();
+        setErr("");
+        try {
+          let id = conv?.id;
+          if (!id) {
+            const created = await api.createConversation(text.slice(0, 40));
+            id = created.id;
+          }
+          const idem = "web-" + Date.now();
+          await api.postMessage(id, text, idem);
+          setText("");
+          await refresh(id);
+        } catch (ex) { setErr((ex as Error).message); }
+      }}>
+        <textarea rows={3} value={text} placeholder="Ask for this computer's system info" onChange={(e) => setText(e.target.value)} />
+        <button className="primary" style={{ marginTop: 8 }} type="submit">Send</button>
+      </form>
+      <button onClick={() => setAdvanced((v) => !v)}>Advanced</button>
+      {advanced && <Chat />}
+    </div>
+  );
+}
+
+function Decisions() {
+  return (
+    <div>
+      <h2>Needs a decision</h2>
+      <Approvals />
+      <EvolutionPage />
     </div>
   );
 }
