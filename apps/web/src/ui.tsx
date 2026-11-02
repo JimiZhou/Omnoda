@@ -188,7 +188,7 @@ function Home() {
         {messages.map((m) => (
           <p key={m.id}><strong>{m.role}</strong> {m.content}</p>
         ))}
-        {task && <p>Current task <span className="pill">{task.Status}</span> <span className="muted">{task.ID}</span> {task.Summary || task.Error}</p>}
+        {task && <p>Current task <span className={"pill " + task.Status}>{task.Status}</span> <span className="muted">{task.ID}</span> {task.Error || task.Summary}</p>}
       </div>
       <form className="card" onSubmit={async (e) => {
         e.preventDefault();

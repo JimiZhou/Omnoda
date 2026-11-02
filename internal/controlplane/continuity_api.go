@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -70,40 +71,50 @@ func (s *Server) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "bad_json", "content is required")
 		return
 	}
-	if body.Idem != "" {
-		if id, st, ok := s.DB.TaskByIdem(body.Idem); ok {
-			writeJSON(w, 200, map[string]any{"conversation_id": conv.ID, "task_id": id, "status": st, "idempotent": true})
-			return
-		}
+	intent := classifySeed(body.Content)
+	spec := protocol.TaskSpec{
+		Kind: "builtin", Prompt: body.Content,
+		Workspace: body.Workspace, TimeoutSec: 120, Level: protocol.LevelReadOnly,
+		Idempotency: body.Idem, Command: intent.Kind,
 	}
-	msg, err := s.DB.AddMessage(conv.ID, "user", body.Content, "")
+	if intent.Kind == "builtin" {
+		spec.Command = intent.Capability
+	}
+	if intent.SideEffect {
+		spec.Level = protocol.LevelWorkspaceWrite
+	}
+	msg, spec, replayed, err := s.DB.CreateMessageTaskReplay(conv.ID, userOf(r), body.Content, spec, intent.SideEffect)
+	if errors.Is(err, storage.ErrIdempotencyConflict) {
+		writeErr(w, 409, "idempotency_conflict", err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, 500, "db", err.Error())
 		return
 	}
-	spec := protocol.TaskSpec{
-		TaskID: storage.NewID("task"), Kind: "builtin", Prompt: body.Content,
-		Workspace: body.Workspace, TimeoutSec: 120, Level: protocol.LevelReadOnly,
-		Idempotency: body.Idem,
-	}
-	if spec.Idempotency == "" {
-		spec.Idempotency = storage.NewID("idem")
-	}
-	if err := s.DB.InsertOwnedTask(spec, userOf(r), conv.ID, body.Content, false); err != nil {
-		writeErr(w, 500, "db", err.Error())
-		return
-	}
 	row, _, _ := s.DB.GetTask(spec.TaskID)
-	if s.jobs != nil {
+	// A committed retry returns the original task. It does not start a second run.
+	if !replayed && row.Status == protocol.TaskQueued && s.jobs != nil {
 		s.jobs.Start(row, spec)
 	}
 	s.DB.Audit(userOf(r), "", spec.TaskID, "", "conversation.message", "", "ok", conv.ID)
-	writeJSON(w, 201, map[string]any{
-		"conversation_id": conv.ID, "message_id": msg.ID, "task_id": spec.TaskID, "status": protocol.TaskQueued,
-	})
+	status := 201
+	bodyOut := map[string]any{
+		"conversation_id": conv.ID, "message_id": msg.ID, "task_id": spec.TaskID, "status": row.Status,
+		"intent": intent.Kind,
+	}
+	if replayed {
+		status = 200
+		bodyOut["idempotent"] = true
+		bodyOut["status"] = row.Status
+	}
+	writeJSON(w, status, bodyOut)
 }
 
 func (s *Server) taskEventsCursor(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 	ev, err := s.DB.EventsAfter(r.PathValue("id"), after)
 	if err != nil {
@@ -117,6 +128,9 @@ func (s *Server) taskEventsCursor(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskRuns(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
 	rows, err := s.DB.Runs(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 500, "db", err.Error())
@@ -132,36 +146,82 @@ func (s *Server) wireJobs() {
 	s.jobs = supervisor.New(context.Background(), s.DB, s.executeBuiltin)
 }
 
-func (s *Server) executeBuiltin(ctx context.Context, row storage.TaskRow, spec protocol.TaskSpec) protocol.TaskResult {
+func (s *Server) executeBuiltin(ctx context.Context, row storage.TaskRow, spec protocol.TaskSpec) (result protocol.TaskResult) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			result = protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: "builtin runner panicked", ExitCode: 1}
+		}
+	}()
 	seq, _ := s.DB.NextEventSeq(row.ID)
 	_ = s.DB.AppendEventOnce(protocol.Event{
 		EventType: protocol.EvRunStarted, Sequence: seq, Timestamp: time.Now().UTC(),
-		TaskID: row.ID, Origin: "omnoda", Payload: map[string]any{"kind": spec.Kind},
+		TaskID: row.ID, Origin: "omnoda", Payload: map[string]any{"kind": spec.Kind, "intent": spec.Command},
 	})
-	if spec.Kind != "builtin" && spec.Kind != "" {
-		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: "supervisor handles builtin goals; node tasks stay on the node runner", ExitCode: 1}
-	}
-	if s.Caps == nil {
-		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: "no local capability registry", ExitCode: 1}
-	}
 	select {
 	case <-ctx.Done():
 		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskCancelled, Error: "cancelled by user", ExitCode: 130}
 	default:
 	}
-	ex := executor.Executor{Reg: s.Caps}
-	res := ex.Invoke(ctx, executor.Request{ID: "omnoda.system-info", Workspace: spec.Workspace})
-	if !res.OK {
-		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: res.Error, ExitCode: res.ExitCode}
+	intent := classifySeed(spec.Prompt)
+	switch intent.Kind {
+	case "builtin":
+		if s.Caps == nil {
+			return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: "no local capability registry", ExitCode: 1}
+		}
+		ex := executor.Executor{Reg: s.Caps}
+		res := ex.Invoke(ctx, executor.Request{ID: intent.Capability, Workspace: spec.Workspace})
+		if !res.OK {
+			return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: res.Error, ExitCode: res.ExitCode}
+		}
+		summary := res.Stdout
+		if summary == "" {
+			summary = intent.Capability
+		}
+		s.note(row.ID, summary)
+		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskSucceeded, Summary: summary, ExitCode: 0}
+	case "missing":
+		msg := "capability_missing: " + intent.Reason
+		s.note(row.ID, msg)
+		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: msg, ExitCode: 1}
+	case "model":
+		if !s.modelConfigured() {
+			msg := "no_model: configure a model provider before asking Seed to plan or explain"
+			s.note(row.ID, msg)
+			return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: msg, ExitCode: 1}
+		}
+		msg := "model_required: Seed recorded the goal. Open Advanced to run the configured model. Seed does not start a second agent harness."
+		s.note(row.ID, msg)
+		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: msg, ExitCode: 1}
+	case "approval":
+		_, _ = s.DB.CreateApproval(storage.Approval{TaskID: row.ID, Action: "seed.side_effect", ArgsJSON: spec.Prompt}, 30*time.Minute)
+		msg := "approval_required: " + intent.Reason
+		s.note(row.ID, msg)
+		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: msg, ExitCode: 1}
+	default:
+		msg := "unsupported: " + intent.Reason
+		s.note(row.ID, msg)
+		return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskFailed, Error: msg, ExitCode: 1}
 	}
-	summary := res.Stdout
-	if summary == "" {
-		summary = "system-info"
+}
+
+func (s *Server) note(taskID, summary string) {
+	if conv := messageConv(s, taskID); conv != "" {
+		_, _ = s.DB.AddMessage(conv, "assistant", summary, taskID)
 	}
-	if conv := messageConv(s, row.ID); conv != "" {
-		_, _ = s.DB.AddMessage(conv, "assistant", summary, row.ID)
+}
+
+func (s *Server) modelConfigured() bool {
+	mc, enc, err := s.DB.LoadModel()
+	return err == nil && enc != "" && mc.BaseURL != ""
+}
+
+func (s *Server) allowTask(w http.ResponseWriter, r *http.Request) bool {
+	ok, err := s.DB.OwnsTask(r.PathValue("id"), userOf(r))
+	if err != nil || !ok {
+		writeErr(w, 404, "not_found", "task not found")
+		return false
 	}
-	return protocol.TaskResult{TaskID: row.ID, Status: protocol.TaskSucceeded, Summary: summary, ExitCode: 0}
+	return true
 }
 
 func messageConv(s *Server, taskID string) string {
