@@ -17,7 +17,35 @@ jobs:
           cache: true
       - run: gofmt -l . | tee /tmp/gofmt.out && ! [ -s /tmp/gofmt.out ]
       - run: go vet ./...
+      # This job does not require bubblewrap. Sandbox-dependent tests skip.
+      # Fail-closed behavior still runs wherever no backend is present.
       - run: go test ./...
+  sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - name: install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: prove isolation or mark blocked
+        run: |
+          set -euo pipefail
+          if bwrap --unshare-all --die-with-parent --new-session --proc /proc --dev /dev --tmpfs /tmp --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 -- /usr/bin/python3 -c 'print("probe")'; then
+            echo "SANDBOX=PASS" | tee -a "$GITHUB_STEP_SUMMARY"
+            go test ./internal/evolver/ ./internal/sandbox/ -count=1
+          else
+            {
+              echo "## SANDBOX=BLOCKED"
+              echo "GitHub-hosted ubuntu-latest cannot start a bubblewrap user namespace."
+              echo "Untrusted packages fail closed in the go job. This job is not a pass."
+              echo "Run \`go test ./internal/evolver/ ./internal/sandbox/ -count=1\` on a Linux host where \`bwrap --unshare-user -- true\` exits 0."
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "::error title=SANDBOX BLOCKED::bubblewrap user namespace is not available on this hosted runner"
+            exit 1
+          fi
   web:
     runs-on: ubuntu-latest
     steps:
