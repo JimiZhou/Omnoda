@@ -108,7 +108,7 @@ func (s *Store) Run(ctx context.Context, id string, gen Generator, maxAttempts i
 		rec.UpdatedAt = time.Now().UTC()
 		return rec, s.save(rec)
 	}
-	for rec.AttemptCount < maxAttempts && rec.State != StAwaitingApproval && rec.State != StFailed && rec.State != StRejected && rec.State != StActivated {
+	for rec.AttemptCount < maxAttempts && rec.State != StAwaitingApproval && rec.State != StFailed && rec.State != StRejected && rec.State != StActivated && rec.FinalStatus != "unverified" {
 		if ctx.Err() != nil {
 			rec.State = StFailed
 			rec.Error = ctx.Err().Error()
@@ -116,9 +116,17 @@ func (s *Store) Run(ctx context.Context, id string, gen Generator, maxAttempts i
 		}
 		rec.AttemptCount++
 		var stepErr error
-		for rec.State != StAwaitingApproval && rec.State != StFailed && rec.State != StRejected && rec.State != StActivated {
+		for rec.State != StAwaitingApproval && rec.State != StFailed && rec.State != StRejected && rec.State != StActivated && rec.FinalStatus != "unverified" {
 			rec, stepErr = s.step(ctx, rec, gen)
 			if stepErr != nil {
+				if rec.FinalStatus == "unverified" {
+					stored, readErr := s.Get(rec.ID)
+					if readErr == nil {
+						rec = stored
+					}
+					stepErr = nil
+					break
+				}
 				rec.Error = stepErr.Error()
 				rec.State = StFailed
 				rec.FinalStatus = "failed"
@@ -178,27 +186,55 @@ func (s *Store) step(ctx context.Context, rec Record, gen Generator) (Record, er
 		if rec.TestResults == nil {
 			rec.TestResults = map[string]bool{}
 		}
+		// Builder output is diagnostic. It never grants verification.
 		rec.TestResults["builder"] = ok
 		rec.Evidence = append(rec.Evidence, Evidence{Phase: "testing", Detail: detail, At: time.Now().UTC()})
-		if !ok {
-			return rec, errors.New("builder tests failed: " + detail)
-		}
 		return rec, nil
 	case StTesting:
 		rec.State = StVerifying
-		ok, detail := runVerifier(rec.PackageDir)
-		rec.TestsRun = append(rec.TestsRun, "verifier")
-		rec.TestResults["verifier"] = ok
-		rec.TestResults["functional_pass"] = ok
+		ok, detail, trusted := verifyCandidate(rec.PackageDir)
+		rec.TestsRun = append(rec.TestsRun, "system_verifier")
+		rec.TestResults["verifier"] = ok && trusted
+		rec.TestResults["functional_pass"] = ok && trusted
 		rec.TestResults["schema_pass"] = true
 		rec.TestResults["security_pass"] = securityCheck(rec.PackageDir)
+		rec.TestResults["independent"] = ok && trusted
+		rec.TestResults["trusted_contract"] = trusted
 		rec.Evidence = append(rec.Evidence, Evidence{Phase: "verifying", Detail: detail, At: time.Now().UTC()})
+		if !trusted {
+			if s.Reg == nil {
+				return rec, errors.New("verifier failed: " + detail)
+			}
+			installed, err := s.Reg.Install(rec.PackageDir, "evolver", "omnoda-evolver", registry.VerifyUnverified)
+			if err != nil {
+				return rec, err
+			}
+			rec.CapabilityID = installed.CapabilityID
+			rec.Version = installed.Version
+			rec.ContentHash = installed.ContentHash
+			rec.State = StFailed
+			rec.FinalStatus = "unverified"
+			rec.Error = "no trusted verification contract: " + detail
+			rec.Evidence = append(rec.Evidence, Evidence{Phase: "verifying", Detail: "installed disabled and unverified", At: time.Now().UTC()})
+			// Persist before Run treats a step error as a hard failure.
+			if err := s.save(rec); err != nil {
+				return rec, err
+			}
+			return rec, errors.New(rec.Error)
+		}
 		if !ok || !rec.TestResults["security_pass"] {
 			return rec, errors.New("verifier failed: " + detail)
 		}
 		return rec, nil
 	case StVerifying:
-		installed, err := s.Reg.Install(rec.PackageDir, "evolver", "omnoda-evolver", registry.VerifyPassed)
+		verify := registry.VerifyUnverified
+		if rec.TestResults["independent"] && rec.TestResults["security_pass"] && rec.TestResults["verifier"] && rec.TestResults["trusted_contract"] {
+			verify = registry.VerifyPassed
+		}
+		if verify != registry.VerifyPassed {
+			return rec, errors.New("refusing to install a passed record without a trusted verifier")
+		}
+		installed, err := s.Reg.Install(rec.PackageDir, "evolver", "omnoda-evolver", verify)
 		if err != nil {
 			return rec, err
 		}

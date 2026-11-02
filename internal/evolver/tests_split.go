@@ -1,55 +1,63 @@
 package evolver
 
 import (
-	"encoding/json"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/JimiZhou/Omnoda/internal/sandbox"
 )
 
-// Builder tests are the generator's own checks.
-// Verifier tests use fixtures the generator is not allowed to rewrite:
-// they live in verifier/expected.json and are hashed into the evidence.
+// Builder tests are the generator's own checks. They never set verification.
+// The independent verifier owns expected.json. A package that ships its own
+// copy is staged aside and is not the fixture the verifier reads.
 
 func runBuilder(dir string) (bool, string) {
-	script := filepath.Join(dir, "builder_test.py")
-	if _, err := os.Stat(script); err != nil {
-		return false, "builder_test.py missing"
+	return runSandboxed(dir, "builder_test.py")
+}
+
+// runVerifier is the system check. Generated verifier_test.py is ignored.
+func runVerifier(dir string) (bool, string) {
+	ok, detail, trusted := verifyCandidate(dir)
+	if !trusted {
+		return false, detail
+	}
+	return ok, detail
+}
+
+func runSandboxed(dir, script string) (bool, string) {
+	path := filepath.Join(dir, script)
+	if _, err := os.Stat(path); err != nil {
+		return false, script + " missing"
 	}
 	if _, err := exec.LookPath("python3"); err != nil {
 		return false, "python3 missing"
 	}
-	cmd := exec.Command("python3", "builder_test.py")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, string(out)
+	backend := sandbox.Select()
+	if !backend.Available() {
+		return false, "sandbox unavailable: " + sandbox.ErrUnavailable.Error()
 	}
-	return true, strings.TrimSpace(string(out))
-}
-
-func runVerifier(dir string) (bool, string) {
-	script := filepath.Join(dir, "verifier_test.py")
-	expected := filepath.Join(dir, "verifier", "expected.json")
-	if _, err := os.Stat(script); err != nil {
-		return false, "verifier_test.py missing"
+	req := sandbox.Untrusted(dir)
+	req.Argv = []string{"python3", script}
+	res := backend.Run(context.Background(), req)
+	detail := strings.TrimSpace(res.Output)
+	if res.Err != nil {
+		if detail == "" {
+			detail = res.Err.Error()
+		} else {
+			detail = res.Err.Error() + ": " + detail
+		}
+		return false, detail
 	}
-	body, err := os.ReadFile(expected)
-	if err != nil {
-		return false, "verifier expected.json missing"
+	if res.ExitCode != 0 {
+		if detail == "" {
+			detail = script + " failed"
+		}
+		return false, detail
 	}
-	var exp map[string]any
-	if json.Unmarshal(body, &exp) != nil || exp["temperature_count"] == nil {
-		return false, "verifier expected.json is not an independent fixture"
-	}
-	cmd := exec.Command("python3", "verifier_test.py")
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, string(out)
-	}
-	return true, strings.TrimSpace(string(out))
+	return true, detail
 }
 
 func securityCheck(dir string) bool {

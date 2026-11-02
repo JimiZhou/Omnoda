@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"net/http"
 	"os"
 
@@ -43,13 +44,12 @@ func (s *Server) createEvo(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	done, err := s.Evos.Run(r.Context(), rec.ID, gen, 2)
-	if err != nil {
-		writeErr(w, 500, "evolver", err.Error())
-		return
-	}
-	s.DB.Audit(userOf(r), "", "", "", "evolution.create", "", string(done.State), done.ID)
-	writeJSON(w, 201, done)
+	// Evolution continues after the browser disconnects. User cancel is a separate call.
+	go func(id string, gen evolver.Generator) {
+		_, _ = s.Evos.Run(context.Background(), id, gen, 2)
+	}(rec.ID, gen)
+	s.DB.Audit(userOf(r), "", "", "", "evolution.create", "", string(rec.State), rec.ID)
+	writeJSON(w, 202, rec)
 }
 
 func (s *Server) listEvos(w http.ResponseWriter, r *http.Request) {
@@ -128,10 +128,23 @@ func (s *Server) agentRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "no_model", "model key could not be opened")
 		return
 	}
-	answer, err := agent.Run(r.Context(), agent.Config{
+	host := &agent.Host{Reg: s.Caps, Workspace: body.Workspace, Request: func(goal, missing string) (string, error) {
+		if s.Evos == nil {
+			return "", os.ErrInvalid
+		}
+		started, err := s.Evos.Start(goal, missing, nil)
+		if err != nil {
+			return "", err
+		}
+		go func() {
+			_, _ = s.Evos.Run(context.Background(), started.ID, &modelGenerator{base: mc.BaseURL, model: mc.Model, key: key}, 2)
+		}()
+		return started.ID, nil
+	}}
+	answer, err := agent.RunHost(context.Background(), agent.Config{
 		BaseURL: mc.BaseURL, Model: mc.Model, APIKey: key,
 		MaxSteps: mc.MaxSteps, TokenBudget: mc.TokenBudget,
-	}, body.Goal, agent.ToolContext{Policy: policy.Policy{Workspaces: compactWS(body.Workspace)}, Workspace: body.Workspace}, nil)
+	}, body.Goal, host, agent.ToolContext{Policy: policy.Policy{Workspaces: compactWS(body.Workspace)}, Workspace: body.Workspace}, nil)
 	if err != nil {
 		writeErr(w, 422, "agent", err.Error())
 		return

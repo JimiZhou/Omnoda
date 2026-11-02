@@ -28,6 +28,7 @@ import (
 	"github.com/JimiZhou/Omnoda/internal/protocol"
 	"github.com/JimiZhou/Omnoda/internal/scheduler"
 	"github.com/JimiZhou/Omnoda/internal/storage"
+	"github.com/JimiZhou/Omnoda/internal/supervisor"
 	"github.com/JimiZhou/Omnoda/internal/workflow"
 	"github.com/gorilla/websocket"
 )
@@ -45,6 +46,7 @@ type Server struct {
 	// Caps and Evos are set by the seed runtime. They stay nil on a plain server.
 	Caps *registry.Registry
 	Evos *evolver.Store
+	jobs *supervisor.Supervisor
 }
 
 func New(db *storage.DB, dataDir, publicURL, version string) (*Server, error) {
@@ -62,11 +64,16 @@ func New(db *storage.DB, dataDir, publicURL, version string) (*Server, error) {
 	s.engine = workflow.New(db, &hubRunner{s: s})
 	s.engine.Load = s.candidates
 	s.mux = http.NewServeMux()
+	s.wireJobs()
 	s.routes()
 	if _, err := db.RecoverInflight(); err != nil {
 		return nil, err
 	}
 	_ = db.MarkOfflineAll()
+	// The seed local node is this process. Remote nodes stay offline until they reconnect.
+	if id, _, err := db.SeedLocal(); err == nil && id != "" {
+		_ = db.TouchNode(id, protocol.NodeOnline)
+	}
 	return s, nil
 }
 
@@ -118,6 +125,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/evolutions/{id}/approve", s.authed(s.approveEvo))
 	s.mux.HandleFunc("POST /api/v1/evolutions/{id}/reject", s.authed(s.rejectEvo))
 	s.mux.HandleFunc("POST /api/v1/agent/run", s.authed(s.agentRun))
+	s.mux.HandleFunc("POST /api/v1/conversations", s.authed(s.createConversation))
+	s.mux.HandleFunc("GET /api/v1/conversations", s.authed(s.listConversations))
+	s.mux.HandleFunc("GET /api/v1/conversations/{id}", s.authed(s.getConversation))
+	s.mux.HandleFunc("POST /api/v1/conversations/{id}/messages", s.authed(s.postMessage))
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/runs", s.authed(s.taskRuns))
 	s.mux.HandleFunc("GET /api/v1/node/ws", s.nodeWS)
 	s.mux.HandleFunc("GET /install.sh", s.installSh)
 	s.mux.HandleFunc("GET /install.ps1", s.installPS)
@@ -358,7 +370,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Idem != "" {
-		if id, st, ok := s.DB.TaskByIdem(body.Idem); ok {
+		if id, st, ok := s.DB.TaskByIdemOwner(userOf(r), body.Idem); ok {
 			writeJSON(w, 200, map[string]any{"task_id": id, "status": st, "idempotent": true})
 			return
 		}
@@ -396,7 +408,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	if spec.Idempotency == "" {
 		spec.Idempotency = storage.NewID("idem")
 	}
-	if err := s.DB.InsertTask(spec); err != nil {
+	if err := s.DB.InsertOwnedTask(spec, userOf(r), "", body.Prompt, body.Level != protocol.LevelReadOnly); err != nil {
+		if errors.Is(err, storage.ErrIdempotencyConflict) {
+			writeErr(w, 409, "idempotency_conflict", err.Error())
+			return
+		}
 		writeErr(w, 500, "db", err.Error())
 		return
 	}
@@ -412,7 +428,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.ListTasks(100)
+	rows, err := s.DB.ListTasksByOwner(userOf(r), 100)
 	if err != nil {
 		writeErr(w, 500, "db", err.Error())
 		return
@@ -424,6 +440,9 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
 	t, spec, err := s.DB.GetTask(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 404, "not_found", "task not found")
@@ -433,6 +452,13 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
+	if r.URL.Query().Has("after") {
+		s.taskEventsCursor(w, r)
+		return
+	}
 	ev, err := s.DB.Events(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 500, "db", err.Error())
@@ -445,6 +471,9 @@ func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
 	t, _, err := s.DB.GetTask(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 404, "not_found", "task not found")
@@ -452,6 +481,9 @@ func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if t.NodeID != "" {
 		_ = s.hub.cancel(t.NodeID, t.ID)
+	}
+	if s.jobs != nil {
+		s.jobs.Cancel(t.ID)
 	}
 	if t.Status == protocol.TaskRunning || t.Status == protocol.TaskQueued {
 		_ = s.DB.SetTaskStatus(t.ID, protocol.TaskCancelled, 130, "cancelled by user", t.Output, "")
@@ -581,6 +613,18 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) {
 func (s *Server) decideApproval(status string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		a, err := s.DB.GetApproval(id)
+		if err != nil {
+			writeErr(w, 404, "not_found", "approval not found")
+			return
+		}
+		if a.TaskID != "" {
+			ok, ownErr := s.DB.OwnsTask(a.TaskID, userOf(r))
+			if ownErr != nil || !ok {
+				writeErr(w, 404, "not_found", "approval not found")
+				return
+			}
+		}
 		if err := s.DB.DecideApproval(id, status); err != nil {
 			writeErr(w, 409, "approval", err.Error())
 			return
@@ -595,6 +639,13 @@ func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 404, "not_found", "artifact not found")
 		return
+	}
+	if a.TaskID != "" {
+		ok, ownErr := s.DB.OwnsTask(a.TaskID, userOf(r))
+		if ownErr != nil || !ok {
+			writeErr(w, 404, "not_found", "artifact not found")
+			return
+		}
 	}
 	if a.Expires != "" {
 		if t, err := time.Parse(time.RFC3339Nano, a.Expires); err == nil && time.Now().After(t) {

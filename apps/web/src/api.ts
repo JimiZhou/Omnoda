@@ -87,6 +87,16 @@ export const api = {
   disableCapability: (id: string) => req(`/api/v1/capabilities/${id}/disable`, { method: "POST", body: "{}" }),
   agentRun: (goal: string, workspace: string) =>
     req<{ answer: string }>("/api/v1/agent/run", { method: "POST", body: JSON.stringify({ goal, workspace }) }),
+  conversations: () => req<{ conversations: Conversation[] }>("/api/v1/conversations"),
+  createConversation: (title: string) =>
+    req<Conversation>("/api/v1/conversations", { method: "POST", body: JSON.stringify({ title }) }),
+  conversation: (id: string) =>
+    req<{ conversation: Conversation; messages: Msg[] }>(`/api/v1/conversations/${id}`),
+  postMessage: (id: string, content: string, idempotency_key: string) =>
+    req<{ conversation_id: string; task_id: string; status: string; idempotent?: boolean }>(
+      `/api/v1/conversations/${id}/messages`,
+      { method: "POST", body: JSON.stringify({ content, idempotency_key }) },
+    ),
 };
 
 export type TaskRow = {
@@ -105,6 +115,8 @@ export type Capability = {
   origin: string; content_hash: string; runtime: string;
   manifest: { metadata: { description: string }; spec: { platforms: string[]; permissions: { network: boolean } } };
 };
+export type Conversation = { id: string; title: string; updated_at: string };
+export type Msg = { id: string; role: string; content: string; task_id?: string; seq: number };
 export type Evolution = {
   evolution_id: string; original_goal: string; state: string; final_status: string; error?: string;
   capability_id?: string; generated_version?: string; token_usage: number;

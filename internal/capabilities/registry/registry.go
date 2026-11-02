@@ -29,9 +29,10 @@ const (
 type Verify string
 
 const (
-	VerifyNone   Verify = "none"
-	VerifyPassed Verify = "passed"
-	VerifyFailed Verify = "failed"
+	VerifyNone       Verify = "none"
+	VerifyPassed     Verify = "passed"
+	VerifyFailed     Verify = "failed"
+	VerifyUnverified Verify = "unverified"
 )
 
 type Record struct {
@@ -169,25 +170,48 @@ func (r *Registry) SetStatus(id, version string, st Status) (Record, error) {
 		return Record{}, err
 	}
 	if st == StatusEnabled {
-		all, _ := r.Versions(id)
-		for _, other := range all {
-			if other.ContentHash == rec.ContentHash {
-				continue
-			}
-			if other.ActivationStatus == StatusEnabled {
-				other.ActivationStatus = StatusDisabled
-				if err := writeRecord(other.Dir, other); err != nil {
-					return Record{}, err
-				}
-			}
-		}
 		if rec.VerificationStatus != VerifyPassed && rec.Origin != "builtin" {
 			return Record{}, errors.New("capability is not verified")
 		}
+		// Confirm the candidate still matches the hash recorded at install.
+		// A package edited after verification must not become the active version.
+		hash, err := HashDirExcept(rec.Dir, "record.json")
+		if err != nil {
+			return Record{}, err
+		}
+		if hash != rec.ContentHash {
+			return Record{}, fmt.Errorf("content hash mismatch for %s", rec.CapabilityID)
+		}
 	}
+	prev := rec.ActivationStatus
 	rec.ActivationStatus = st
 	if err := writeRecord(rec.Dir, rec); err != nil {
 		return Record{}, err
+	}
+	if st == StatusEnabled {
+		all, err := r.Versions(id)
+		if err != nil {
+			rec.ActivationStatus = prev
+			_ = writeRecord(rec.Dir, rec)
+			return Record{}, err
+		}
+		var disabled []Record
+		for _, other := range all {
+			if other.ContentHash == rec.ContentHash || other.ActivationStatus != StatusEnabled {
+				continue
+			}
+			other.ActivationStatus = StatusDisabled
+			if err := writeRecord(other.Dir, other); err != nil {
+				for _, back := range disabled {
+					back.ActivationStatus = StatusEnabled
+					_ = writeRecord(back.Dir, back)
+				}
+				rec.ActivationStatus = prev
+				_ = writeRecord(rec.Dir, rec)
+				return Record{}, err
+			}
+			disabled = append(disabled, other)
+		}
 	}
 	return rec, nil
 }

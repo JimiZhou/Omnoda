@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Omnoda Control Plane API
-  version: 0.2.0
+  version: 0.3.0
 paths:
   /api/v1/auth/login:
     post:
@@ -100,7 +100,24 @@ paths:
       summary: Reject a candidate waiting for approval.
   /api/v1/agent/run:
     post:
-      summary: One native agent turn. Requires a configured model. Does not invent a reply.
+      summary: One native agent turn. Requires a configured model. Does not invent a reply. Uses the capability host, including request_capability.
+  /api/v1/conversations:
+    post:
+      summary: Create a persistent conversation for the signed-in user.
+    get:
+      summary: List the signed-in user's conversations.
+  /api/v1/conversations/{id}:
+    get:
+      summary: Conversation and ordered messages.
+  /api/v1/conversations/{id}/messages:
+    post:
+      summary: Append a user message and start a durable task. Idempotency key returns the existing task.
+  /api/v1/tasks/{id}/events:
+    get:
+      summary: Task events. Query after returns events with a greater sequence.
+  /api/v1/tasks/{id}/runs:
+    get:
+      summary: Execution records for a task. A new run is labeled when the original process cannot be resumed.
   /api/v1/node/ws:
     get:
       summary: Node websocket. Requires enrollment or a known device key. Not a public RPC endpoint.

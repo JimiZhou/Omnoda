@@ -63,6 +63,19 @@ func (s *Server) setCap(w http.ResponseWriter, r *http.Request, st registry.Stat
 		Version string `json:"version"`
 	}
 	_ = decode(r, &body)
+	if st == registry.StatusEnabled {
+		current, err := s.Caps.Get(r.PathValue("id"), body.Version)
+		if err != nil {
+			writeErr(w, 404, "not_found", "capability not found")
+			return
+		}
+		if current.VerificationStatus == registry.VerifyUnverified || current.VerificationStatus == registry.VerifyFailed || current.VerificationStatus == registry.VerifyNone {
+			if current.Origin != "builtin" {
+				writeErr(w, 409, "unverified", "capability is unverified and cannot be enabled")
+				return
+			}
+		}
+	}
 	rec, err := s.Caps.SetStatus(r.PathValue("id"), body.Version, st)
 	if err != nil {
 		writeErr(w, 409, "capability", err.Error())

@@ -101,6 +101,10 @@ func Bootstrap(root string) (*Runtime, error) {
 	}
 	srv.Caps = reg
 	srv.Evos = ev
+	if _, err := EnsureLocalNode(db, ""); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Runtime{Paths: p, DB: db, Server: srv, Reg: reg, Evos: ev}, nil
 }
 
