@@ -486,9 +486,39 @@ func (d *DB) BindTaskNode(id, nodeID string) error {
 }
 
 func (d *DB) SetTaskStatus(id string, st protocol.TaskStatus, exitCode int, summary, output, errStr string) error {
-	_, err := d.sql.Exec(`UPDATE tasks SET status=?, exit_code=?, summary=?, output=?, error=?, updated_at=? WHERE id=?`,
-		st, exitCode, summary, clip(output, 200_000), errStr, now(), id)
-	return err
+	// A terminal status is sticky. A late runner cannot replace cancelled,
+	// succeeded, failed, timed_out, or uncertain with another outcome.
+	res, err := d.sql.Exec(`UPDATE tasks SET status=?, exit_code=?, summary=CASE WHEN ?<>'' THEN ? ELSE summary END, output=CASE WHEN ?<>'' THEN ? ELSE output END, error=?, updated_at=?
+		WHERE id=? AND status NOT IN ('succeeded','failed','cancelled','timed_out','uncertain')`,
+		st, exitCode, summary, summary, output, clip(output, 200_000), errStr, now(), id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 1 {
+		return nil
+	}
+	var cur string
+	qerr := d.sql.QueryRow(`SELECT status FROM tasks WHERE id=?`, id).Scan(&cur)
+	if qerr != nil {
+		return qerr
+	}
+	if cur == string(st) {
+		return nil
+	}
+	if terminalStatus(protocol.TaskStatus(cur)) {
+		return ErrTerminal
+	}
+	return nil
+}
+
+func terminalStatus(st protocol.TaskStatus) bool {
+	switch st {
+	case protocol.TaskSucceeded, protocol.TaskFailed, protocol.TaskCancelled, protocol.TaskTimedOut, protocol.TaskUncertain:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *DB) GetTask(id string) (TaskRow, protocol.TaskSpec, error) {
@@ -500,6 +530,20 @@ func (d *DB) GetTask(id string) (TaskRow, protocol.TaskSpec, error) {
 		_ = json.Unmarshal([]byte(t.SpecJSON), &spec)
 	}
 	return t, spec, err
+}
+
+// TaskByIdemOwner finds a task only inside one owner's key space.
+func (d *DB) TaskByIdemOwner(owner, key string) (string, protocol.TaskStatus, bool) {
+	if key == "" || owner == "" {
+		return "", "", false
+	}
+	var id string
+	var st protocol.TaskStatus
+	err := d.sql.QueryRow(`SELECT id, status FROM tasks WHERE owner_id=? AND idempotency_key=?`, owner, key).Scan(&id, &st)
+	if err != nil {
+		return "", "", false
+	}
+	return id, st, true
 }
 
 func (d *DB) TaskByIdem(key string) (string, protocol.TaskStatus, bool) {
@@ -542,6 +586,26 @@ func (d *DB) Events(taskID string) ([]protocol.Event, error) {
 	return out, rows.Err()
 }
 
+func (d *DB) ListTasksByOwner(owner string, limit int) ([]TaskRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := d.sql.Query(`SELECT id,COALESCE(node_id,''),COALESCE(workflow_id,''),COALESCE(step_id,''),COALESCE(kind,''),spec_json,status,COALESCE(exit_code,0),COALESCE(summary,''),COALESCE(output,''),COALESCE(error,''),COALESCE(idempotency_key,'') FROM tasks WHERE owner_id=? ORDER BY created_at DESC LIMIT ?`, owner, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaskRow
+	for rows.Next() {
+		var t TaskRow
+		if err := rows.Scan(&t.ID, &t.NodeID, &t.WorkflowID, &t.StepID, &t.Kind, &t.SpecJSON, &t.Status, &t.ExitCode, &t.Summary, &t.Output, &t.Error, &t.IdemKey); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) ListTasks(limit int) ([]TaskRow, error) {
 	if limit <= 0 {
 		limit = 50
@@ -569,6 +633,7 @@ func (d *DB) RecoverInflight() (int, error) {
 	// only when side_effect is 0.
 	res, err := d.sql.Exec(`UPDATE tasks SET status=?, error=COALESCE(error,'') || ' server restarted while running', updated_at=? WHERE status='running' OR (status='queued' AND side_effect=1)`,
 		protocol.TaskUncertain, now())
+	_, _ = d.sql.Exec(`UPDATE runs SET status=?, ended_at=? WHERE status='running'`, protocol.TaskUncertain, now())
 	if err != nil {
 		return 0, err
 	}

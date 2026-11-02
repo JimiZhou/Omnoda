@@ -15,10 +15,14 @@ import (
 func (d *DB) migrateV2() error {
 	var version int
 	_ = d.sql.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&version)
-	if version >= 2 {
+	if version >= 3 {
 		return nil
 	}
-	stmts := []string{
+	return d.applyMigration(version)
+}
+
+func v2Stmts() []string {
+	return []string{
 		`ALTER TABLE tasks ADD COLUMN conversation_id TEXT`,
 		`ALTER TABLE tasks ADD COLUMN owner_id TEXT`,
 		`ALTER TABLE tasks ADD COLUMN goal TEXT`,
@@ -59,6 +63,26 @@ func (d *DB) migrateV2() error {
 		)`,
 		`INSERT OR IGNORE INTO schema_migrations(version) VALUES (2)`,
 	}
+}
+
+func v3Stmts() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS event_seq (
+			task_id TEXT PRIMARY KEY,
+			next_seq INTEGER NOT NULL
+		)`,
+		`INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)`,
+	}
+}
+
+func (d *DB) applyMigration(version int) error {
+	var stmts []string
+	if version < 2 {
+		stmts = append(stmts, v2Stmts()...)
+	}
+	if version < 3 {
+		stmts = append(stmts, v3Stmts()...)
+	}
 	for _, s := range stmts {
 		if _, err := d.sql.Exec(s); err != nil {
 			// Adding a column twice is not an error on a retried migrate.
@@ -67,8 +91,22 @@ func (d *DB) migrateV2() error {
 			}
 		}
 	}
+	if version < 3 {
+		if _, err := d.sql.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS tasks_owner_idem ON tasks(owner_id, idempotency_key) WHERE owner_id IS NOT NULL AND idempotency_key IS NOT NULL AND idempotency_key <> ''`); err != nil {
+			return err
+		}
+		if _, err := d.sql.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS task_events_task_seq ON task_events(task_id, seq)`); err != nil {
+			return err
+		}
+	}
 	return nil
 }
+
+// ErrIdempotencyConflict means the key exists for this owner with a different body.
+var ErrIdempotencyConflict = errors.New("idempotency key reused with a different request")
+
+// ErrTerminal is returned when a write would replace a finished task status.
+var ErrTerminal = errors.New("task is already in a terminal status")
 
 func isDupColumn(err error) bool {
 	return err != nil && (contains(err.Error(), "duplicate column") || contains(err.Error(), "already exists"))
@@ -215,16 +253,92 @@ func (d *DB) Messages(conversationID string) ([]Message, error) {
 }
 
 func (d *DB) InsertOwnedTask(spec protocol.TaskSpec, owner, conversation, goal string, sideEffect bool) error {
+	_, _, err := d.CreateMessageTask(conversation, owner, goal, spec, sideEffect)
+	return err
+}
+
+// CreateMessageTask writes the user message and the queued task in one transaction.
+// A repeated key for the same owner and the same body returns the original task.
+// A repeated key with a different body is rejected. Another owner's key is invisible.
+func (d *DB) CreateMessageTask(conversation, owner, content string, spec protocol.TaskSpec, sideEffect bool) (Message, protocol.TaskSpec, error) {
+	msg, spec, _, err := d.createMessageTask(conversation, owner, content, spec, sideEffect)
+	return msg, spec, err
+}
+
+// CreateMessageTaskReplay is CreateMessageTask plus whether the row already existed.
+func (d *DB) CreateMessageTaskReplay(conversation, owner, content string, spec protocol.TaskSpec, sideEffect bool) (Message, protocol.TaskSpec, bool, error) {
+	return d.createMessageTask(conversation, owner, content, spec, sideEffect)
+}
+
+func (d *DB) createMessageTask(conversation, owner, content string, spec protocol.TaskSpec, sideEffect bool) (Message, protocol.TaskSpec, bool, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return Message{}, spec, false, err
+	}
+	defer tx.Rollback()
+	if spec.Idempotency != "" && owner != "" {
+		var existingID, existingSpec string
+		err := tx.QueryRow(`SELECT id, spec_json FROM tasks WHERE owner_id=? AND idempotency_key=?`, owner, spec.Idempotency).Scan(&existingID, &existingSpec)
+		if err == nil {
+			var prev protocol.TaskSpec
+			_ = json.Unmarshal([]byte(existingSpec), &prev)
+			if !sameRequest(prev, spec) {
+				return Message{}, spec, false, ErrIdempotencyConflict
+			}
+			spec.TaskID = existingID
+			var msg Message
+			var created string
+			qerr := tx.QueryRow(`SELECT id,conversation_id,seq,role,content,COALESCE(task_id,''),created_at FROM messages WHERE task_id=? AND role='user' ORDER BY seq LIMIT 1`, existingID).
+				Scan(&msg.ID, &msg.ConversationID, &msg.Seq, &msg.Role, &msg.Content, &msg.TaskID, &created)
+			if qerr == nil {
+				msg.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+			}
+			return msg, spec, true, tx.Commit()
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Message{}, spec, false, err
+		}
+	}
+	var seq int
+	if conversation != "" {
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(seq),0)+1 FROM messages WHERE conversation_id=?`, conversation).Scan(&seq); err != nil {
+			return Message{}, spec, false, err
+		}
+	}
+	if spec.TaskID == "" {
+		spec.TaskID = NewID("task")
+	}
+	if spec.Idempotency == "" {
+		spec.Idempotency = NewID("idem")
+	}
 	b, _ := json.Marshal(spec)
 	flag := 0
 	if sideEffect {
 		flag = 1
 	}
-	_, err := d.sql.Exec(`INSERT INTO tasks(id,node_id,workflow_id,step_id,kind,spec_json,status,idempotency_key,created_at,updated_at,conversation_id,owner_id,goal,side_effect)
+	if _, err := tx.Exec(`INSERT INTO tasks(id,node_id,workflow_id,step_id,kind,spec_json,status,idempotency_key,created_at,updated_at,conversation_id,owner_id,goal,side_effect)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		spec.TaskID, "", spec.WorkflowID, spec.StepID, spec.Kind, string(b), protocol.TaskQueued, spec.Idempotency, now(), now(),
-		nullIfEmpty(conversation), nullIfEmpty(owner), goal, flag)
-	return err
+		nullIfEmpty(conversation), nullIfEmpty(owner), content, flag); err != nil {
+		return Message{}, spec, false, err
+	}
+	msg := Message{}
+	if conversation != "" {
+		msg = Message{ID: NewID("msg"), ConversationID: conversation, Seq: seq, Role: "user", Content: content, TaskID: spec.TaskID}
+		if _, err := tx.Exec(`INSERT INTO messages(id,conversation_id,seq,role,content,task_id,created_at) VALUES(?,?,?,?,?,?,?)`,
+			msg.ID, msg.ConversationID, msg.Seq, msg.Role, msg.Content, spec.TaskID, now()); err != nil {
+			return Message{}, spec, false, err
+		}
+		if _, err := tx.Exec(`UPDATE conversations SET updated_at=? WHERE id=?`, now(), conversation); err != nil {
+			return Message{}, spec, false, err
+		}
+		msg.CreatedAt = time.Now().UTC()
+	}
+	return msg, spec, false, tx.Commit()
+}
+
+func sameRequest(prev, next protocol.TaskSpec) bool {
+	return prev.Prompt == next.Prompt && prev.Kind == next.Kind && prev.Command == next.Command && prev.Workspace == next.Workspace && prev.HarnessID == next.HarnessID
 }
 
 func (d *DB) StartRun(taskID, nodeID, adapter string) (RunRow, error) {
@@ -283,23 +397,48 @@ func (d *DB) EventsAfter(taskID string, after int64) ([]protocol.Event, error) {
 	return out, rows.Err()
 }
 
-// NextEventSeq is the next monotonic sequence for a task.
+// NextEventSeq allocates the next sequence inside a write transaction.
+// Concurrent callers cannot observe the same value.
 func (d *DB) NextEventSeq(taskID string) (int64, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	var n int64
-	err := d.sql.QueryRow(`SELECT COALESCE(MAX(seq),0)+1 FROM task_events WHERE task_id=?`, taskID).Scan(&n)
-	return n, err
+	err = tx.QueryRow(`SELECT next_seq FROM event_seq WHERE task_id=?`, taskID).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		var max int64
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM task_events WHERE task_id=?`, taskID).Scan(&max); err != nil {
+			return 0, err
+		}
+		n = max + 1
+		if _, err := tx.Exec(`INSERT INTO event_seq(task_id, next_seq) VALUES(?,?)`, taskID, n+1); err != nil {
+			return 0, err
+		}
+		return n, tx.Commit()
+	}
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE event_seq SET next_seq=? WHERE task_id=?`, n+1, taskID); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
 }
 
 func (d *DB) AppendEventOnce(ev protocol.Event) error {
-	var existing int
-	err := d.sql.QueryRow(`SELECT COUNT(*) FROM task_events WHERE task_id=? AND seq=?`, ev.TaskID, ev.Sequence).Scan(&existing)
-	if err != nil {
-		return err
-	}
-	if existing > 0 {
+	b, _ := json.Marshal(ev)
+	_, err := d.sql.Exec(`INSERT INTO task_events(task_id,seq,event_json,created_at) VALUES(?,?,?,?)`,
+		ev.TaskID, ev.Sequence, string(b), now())
+	if err != nil && isUnique(err) {
 		return nil
 	}
-	return d.AppendEvent(ev)
+	return err
+}
+
+func isUnique(err error) bool {
+	return err != nil && (contains(err.Error(), "UNIQUE") || contains(err.Error(), "unique"))
 }
 
 func (d *DB) QueuedTasks() ([]TaskRow, error) {
@@ -321,6 +460,20 @@ func scanTasks(rows *sql.Rows) ([]TaskRow, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// OwnsTask reports whether userID may read or cancel the task.
+// A row with an empty owner is legacy data. Only an empty caller, which is
+// the in-process supervisor, may touch it. A logged-in user may not.
+func (d *DB) OwnsTask(id, userID string) (bool, error) {
+	_, owner, _, _, err := d.TaskMeta(id)
+	if err != nil {
+		return false, err
+	}
+	if owner == "" {
+		return userID == "", nil
+	}
+	return owner == userID, nil
 }
 
 func (d *DB) TaskMeta(id string) (conversation, owner, goal string, sideEffect bool, err error) {

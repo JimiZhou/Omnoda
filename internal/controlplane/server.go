@@ -370,7 +370,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Idem != "" {
-		if id, st, ok := s.DB.TaskByIdem(body.Idem); ok {
+		if id, st, ok := s.DB.TaskByIdemOwner(userOf(r), body.Idem); ok {
 			writeJSON(w, 200, map[string]any{"task_id": id, "status": st, "idempotent": true})
 			return
 		}
@@ -408,7 +408,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	if spec.Idempotency == "" {
 		spec.Idempotency = storage.NewID("idem")
 	}
-	if err := s.DB.InsertTask(spec); err != nil {
+	if err := s.DB.InsertOwnedTask(spec, userOf(r), "", body.Prompt, body.Level != protocol.LevelReadOnly); err != nil {
+		if errors.Is(err, storage.ErrIdempotencyConflict) {
+			writeErr(w, 409, "idempotency_conflict", err.Error())
+			return
+		}
 		writeErr(w, 500, "db", err.Error())
 		return
 	}
@@ -424,7 +428,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.ListTasks(100)
+	rows, err := s.DB.ListTasksByOwner(userOf(r), 100)
 	if err != nil {
 		writeErr(w, 500, "db", err.Error())
 		return
@@ -436,6 +440,9 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
 	t, spec, err := s.DB.GetTask(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 404, "not_found", "task not found")
@@ -445,6 +452,9 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
 	if r.URL.Query().Has("after") {
 		s.taskEventsCursor(w, r)
 		return
@@ -461,6 +471,9 @@ func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
+	if !s.allowTask(w, r) {
+		return
+	}
 	t, _, err := s.DB.GetTask(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 404, "not_found", "task not found")
@@ -600,6 +613,18 @@ func (s *Server) listApprovals(w http.ResponseWriter, r *http.Request) {
 func (s *Server) decideApproval(status string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		a, err := s.DB.GetApproval(id)
+		if err != nil {
+			writeErr(w, 404, "not_found", "approval not found")
+			return
+		}
+		if a.TaskID != "" {
+			ok, ownErr := s.DB.OwnsTask(a.TaskID, userOf(r))
+			if ownErr != nil || !ok {
+				writeErr(w, 404, "not_found", "approval not found")
+				return
+			}
+		}
 		if err := s.DB.DecideApproval(id, status); err != nil {
 			writeErr(w, 409, "approval", err.Error())
 			return
@@ -614,6 +639,13 @@ func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 404, "not_found", "artifact not found")
 		return
+	}
+	if a.TaskID != "" {
+		ok, ownErr := s.DB.OwnsTask(a.TaskID, userOf(r))
+		if ownErr != nil || !ok {
+			writeErr(w, 404, "not_found", "artifact not found")
+			return
+		}
 	}
 	if a.Expires != "" {
 		if t, err := time.Parse(time.RFC3339Nano, a.Expires); err == nil && time.Now().After(t) {
