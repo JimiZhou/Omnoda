@@ -77,12 +77,23 @@ print(net)
 	if err := os.WriteFile(filepath.Join(pkg, "verifier", "expected.json"), []byte(`{"temperature_count":1,"samples":1,"anomalies":0,"temperature_avg":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The system verifier runs the candidate entrypoint, not verifier_test.py.
+	loopSrc := "import argparse\np=argparse.ArgumentParser(); p.add_argument('--input'); p.add_argument('--output'); p.parse_args()\nwhile True:\n    pass\n"
+	if err := os.MkdirAll(filepath.Join(pkg, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "src", "main.py"), []byte(loopSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "capability.json"), []byte(fixtureManifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	ok, detail = runVerifier(pkg)
 	if ok {
-		t.Fatal("infinite verifier passed")
+		t.Fatal("infinite candidate passed")
 	}
-	if !strings.Contains(detail, "timeout") && !strings.Contains(detail, "sandbox") {
-		t.Fatalf("verifier loop was not bounded: %s", detail)
+	if !strings.Contains(detail, "timeout") && !strings.Contains(detail, "sandbox") && !strings.Contains(detail, "signal") {
+		t.Fatalf("candidate loop was not bounded: %s", detail)
 	}
 	_ = context.Background()
 }

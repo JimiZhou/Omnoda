@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/JimiZhou/Omnoda/internal/capabilities/registry"
+	"github.com/JimiZhou/Omnoda/internal/sandbox"
 )
 
 func TestEvolutionRequiresApproval(t *testing.T) {
@@ -35,6 +36,9 @@ func TestEvolutionRequiresApproval(t *testing.T) {
 func TestFixtureEvolutionSeparatedTests(t *testing.T) {
 	if _, err := lookPython(); err != nil {
 		t.Skip("python3 required")
+	}
+	if !sandboxAvailable() {
+		t.Skip("sandbox backend required for a real independent verification; fail-closed is TestFixtureEvolutionFailClosed")
 	}
 	reg, _ := registry.Open(t.TempDir())
 	st, _ := Open(t.TempDir(), reg)
@@ -76,9 +80,44 @@ func TestFixtureEvolutionSeparatedTests(t *testing.T) {
 	}
 }
 
+func TestFixtureEvolutionFailClosed(t *testing.T) {
+	if sandbox.Select().Available() {
+		t.Skip("sandbox is available; success path is TestFixtureEvolutionSeparatedTests")
+	}
+	reg, err := registry.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(t.TempDir(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := st.Start("parse OMN1 logs", "local.sensor-log", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Run(context.Background(), rec.ID, FixtureGenerator{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State == StAwaitingApproval || got.State == StActivated {
+		t.Fatalf("missing sandbox activated a capability: %s", got.State)
+	}
+	if got.State != StFailed {
+		t.Fatalf("state %s err %s", got.State, got.Error)
+	}
+	active, getErr := reg.Get("local.sensor-log", "")
+	if getErr == nil && active.ActivationStatus == registry.StatusEnabled {
+		t.Fatal("enabled without a sandbox")
+	}
+}
+
 func TestVerifierFailureDoesNotActivate(t *testing.T) {
 	if _, err := execLook("python3"); err != nil {
 		t.Skip("python3")
+	}
+	if !sandboxAvailable() {
+		t.Skip("sandbox backend required to observe a candidate failure")
 	}
 	reg, _ := registry.Open(t.TempDir())
 	st, _ := Open(t.TempDir(), reg)
@@ -105,6 +144,8 @@ func (brokenGen) Generate(ctx context.Context, goal, dest string) (int, error) {
 	// Break the parser so independent expected values cannot pass.
 	return n, osWrite(dest+"/src/main.py", "import sys\nsys.exit(1)\n")
 }
+
+func sandboxAvailable() bool { return sandbox.Select().Available() }
 
 func lookPython() (string, error) { return execLook("python3") }
 

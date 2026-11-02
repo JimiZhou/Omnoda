@@ -2,7 +2,6 @@ package evolver
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,21 +18,13 @@ func runBuilder(dir string) (bool, string) {
 	return runSandboxed(dir, "builder_test.py")
 }
 
+// runVerifier is the system check. Generated verifier_test.py is ignored.
 func runVerifier(dir string) (bool, string) {
-	script := filepath.Join(dir, "verifier_test.py")
-	if _, err := os.Stat(script); err != nil {
-		return false, "verifier_test.py missing"
+	ok, detail, trusted := verifyCandidate(dir)
+	if !trusted {
+		return false, detail
 	}
-	expected := filepath.Join(dir, "verifier", "expected.json")
-	body, err := os.ReadFile(expected)
-	if err != nil {
-		return false, "independent verifier fixture missing"
-	}
-	var exp map[string]any
-	if json.Unmarshal(body, &exp) != nil || exp["temperature_count"] == nil {
-		return false, "verifier expected.json is not an independent fixture"
-	}
-	return runSandboxed(dir, "verifier_test.py")
+	return ok, detail
 }
 
 func runSandboxed(dir, script string) (bool, string) {
