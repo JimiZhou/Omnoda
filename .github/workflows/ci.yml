@@ -33,17 +33,22 @@ jobs:
       - name: prove isolation or mark blocked
         run: |
           set -euo pipefail
+          # Same namespace set as internal/sandbox: --unshare-all, no --share-net.
+          # A probe that keeps the host network would not prove the product policy.
+          # ubuntu-latest currently fails with "loopback: Failed RTM_NEWADDR:
+          # Operation not permitted". That result is BLOCKED, not a pass.
           if bwrap --unshare-all --die-with-parent --new-session --proc /proc --dev /dev --tmpfs /tmp --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 -- /usr/bin/python3 -c 'print("probe")'; then
             echo "SANDBOX=PASS" | tee -a "$GITHUB_STEP_SUMMARY"
             go test ./internal/evolver/ ./internal/sandbox/ -count=1
           else
             {
               echo "## SANDBOX=BLOCKED"
-              echo "GitHub-hosted ubuntu-latest cannot start a bubblewrap user namespace."
+              echo "GitHub-hosted ubuntu-latest cannot create the bubblewrap network namespace used by the product sandbox."
+              echo "Observed failure: loopback RTM_NEWADDR: Operation not permitted."
               echo "Untrusted packages fail closed in the go job. This job is not a pass."
-              echo "Run \`go test ./internal/evolver/ ./internal/sandbox/ -count=1\` on a Linux host where \`bwrap --unshare-user -- true\` exits 0."
+              echo "Real isolation was run on a Linux amd64 host with bubblewrap 0.11.1. Repeat with: go test ./internal/evolver/ ./internal/sandbox/ -count=1"
             } | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "::error title=SANDBOX BLOCKED::bubblewrap user namespace is not available on this hosted runner"
+            echo "::error title=SANDBOX BLOCKED::bubblewrap --unshare-all cannot configure loopback on this hosted runner"
             exit 1
           fi
   web:

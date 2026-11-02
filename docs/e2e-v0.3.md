@@ -13,7 +13,7 @@ Host for the integration rows: Linux x86_64, bubblewrap 0.11.1, Go toolchain in 
 |---|---|---|
 | Generated script cannot run without a sandbox | UNIT VERIFIED | `TestNoBackendRefusesGeneratedScript` skips here because bwrap exists. `TestFixtureEvolutionFailClosed` covers the other branch. |
 | Real bubblewrap isolation | INTEGRATION VERIFIED | `go test ./internal/evolver/ ./internal/sandbox/ -count=1` on this host. Includes host-file, write, network, and loop cases. |
-| GitHub-hosted runner isolation | BLOCKED until the `sandbox` job probe passes | Hosted runners often lack a user namespace. The job prints `SANDBOX=BLOCKED` and fails. It does not report pass. |
+| GitHub-hosted runner isolation | BLOCKED | ubuntu-latest `bwrap --unshare-all` fails with `RTM_NEWADDR: Operation not permitted`. The `sandbox` job exits 1 and prints `SANDBOX=BLOCKED`. |
 | Sensor-log independent verifier | INTEGRATION VERIFIED | System fixture, not `verifier_test.py`. Wrong candidate and always-pass verifier fail. |
 | Capability with no trusted contract | UNIT VERIFIED | Stored `unverified`, enable rejected. |
 | Linux seed, no third-party agent required | INTEGRATION VERIFIED | Clean root, admin created, `omnoda.system-info` returned `linux/amd64`. |

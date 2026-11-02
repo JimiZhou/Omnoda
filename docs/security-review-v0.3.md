@@ -36,7 +36,7 @@ Builder success is stored as a diagnostic bit. Activation requires `VerifyPassed
 ## Residual risk
 
 - The trusted contract covers `local.sensor-log` only. Other generated packages remain disabled.
-- GitHub-hosted runners may be unable to run the isolation tests. That is recorded as blocked, and the isolation proof stays on a Linux host with a working user namespace.
+- GitHub-hosted ubuntu-latest cannot configure bubblewrap's loopback (`RTM_NEWADDR: Operation not permitted`). The `sandbox` job is BLOCKED. Isolation evidence is the Linux amd64 run with bubblewrap 0.11.1. The product policy was not changed to `--share-net`.
 - Resource checks are per task owner. The product is still a single-admin seed. A future multi-user mode needs the same checks on every new route.
 - Codex `--ephemeral` and Claude print mode are not durable sessions. A live agent run was not performed.
 - Static `securityCheck` is a hint. The sandbox and the system verifier are the controls that decide execution and activation.
